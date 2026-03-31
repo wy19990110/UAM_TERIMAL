@@ -2,16 +2,16 @@ classdef NetworkDesign
     % NetworkDesign 网络设计方案 y = (x, z, f)
     %
     %   属性:
-    %     corridorActivation   - x_e: containers.Map corridorId -> logical
-    %     styleSelection       - z_tk: containers.Map terminalId -> styleId
-    %     flowAllocation       - f: containers.Map corridorId -> flow (double)
-    %     unmetDemand          - 未满足需求量
+    %     corridorActivation - x_e: containers.Map corridorId -> logical
+    %     styleSelection     - z_tk: containers.Map terminalId -> styleId
+    %     flowAllocation     - containers.Map scenarioId -> containers.Map(corridorId -> flow)
+    %     unmetDemand        - containers.Map scenarioId -> unmet (double)，或标量(单场景)
 
     properties
-        corridorActivation   % containers.Map (string -> logical)
-        styleSelection       % containers.Map (string -> string)
-        flowAllocation       % containers.Map (string -> double)
-        unmetDemand  (1,1) double = 0
+        corridorActivation   % containers.Map (char -> logical)
+        styleSelection       % containers.Map (char -> char)
+        flowAllocation       % containers.Map (char -> containers.Map(char -> double))
+        unmetDemand          % containers.Map (char -> double) 或标量
     end
 
     methods
@@ -20,7 +20,7 @@ classdef NetworkDesign
                 corridorActivation = containers.Map()
                 styleSelection     = containers.Map()
                 flowAllocation     = containers.Map()
-                unmetDemand        (1,1) double = 0
+                unmetDemand        = 0
             end
             obj.corridorActivation = corridorActivation;
             obj.styleSelection = styleSelection;
@@ -43,6 +43,40 @@ classdef NetworkDesign
             ids1 = sort(obj.activeCorridors());
             ids2 = sort(other.activeCorridors());
             tf = isequal(ids1, ids2);
+        end
+
+        function f = getFlow(obj, scenarioId, corridorId)
+            % 获取指定场景和走廊的流量
+            if isa(obj.flowAllocation, 'containers.Map')
+                scenKey = char(scenarioId);
+                if obj.flowAllocation.isKey(scenKey)
+                    scenFlow = obj.flowAllocation(scenKey);
+                    corrKey = char(corridorId);
+                    if scenFlow.isKey(corrKey)
+                        f = scenFlow(corrKey);
+                    else
+                        f = 0;
+                    end
+                else
+                    f = 0;
+                end
+            else
+                f = 0;
+            end
+        end
+
+        function u = getUnmet(obj, scenarioId)
+            % 获取指定场景的未满足需求
+            if isa(obj.unmetDemand, 'containers.Map')
+                key = char(scenarioId);
+                if obj.unmetDemand.isKey(key)
+                    u = obj.unmetDemand(key);
+                else
+                    u = 0;
+                end
+            else
+                u = obj.unmetDemand;  % 标量（单场景兼容）
+            end
         end
     end
 end

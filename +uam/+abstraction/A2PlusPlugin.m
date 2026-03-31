@@ -1,15 +1,17 @@
-classdef FullModelPlugin < uam.abstraction.TerminalPlugin
-    % FullModelPlugin 完整中观模型插件 — 看全部 (A, μ, D, V, X, C)
+classdef A2PlusPlugin < uam.abstraction.TerminalPlugin
+    % A2PlusPlugin 全部抽象 — 看 (A, μ, D, V, X, C)
     %
-    %   作为真值基准使用。所有方法都查询完整的 TerminalResponse。
+    %   所有方法均查询完整 TerminalResponse，与 FullModelPlugin 行为一致。
+    %   区别在于 A2PlusPlugin 使用预计算的 responses，
+    %   而 FullModelPlugin 未来可直接调用中观模型实时计算。
 
     properties (Access = private)
         responses  % containers.Map: "terminalId-styleId" -> TerminalResponse
-        extWeights (1,2) double = [1.0, 1.0]  % [噪声权重, 人口暴露权重]
+        extWeights (1,2) double = [1.0, 1.0]
     end
 
     methods
-        function obj = FullModelPlugin(responses, extWeights)
+        function obj = A2PlusPlugin(responses, extWeights)
             arguments
                 responses
                 extWeights (1,2) double = [1.0, 1.0]

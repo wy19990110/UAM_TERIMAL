@@ -1,7 +1,10 @@
-classdef FullModelPlugin < uam.abstraction.TerminalPlugin
-    % FullModelPlugin 完整中观模型插件 — 看全部 (A, μ, D, V, X, C)
+classdef A2Plugin < uam.abstraction.TerminalPlugin
+    % A2Plugin 容量 + 接口 + 空域/外部性抽象 — 看 (A, μ, D, V, X)
     %
-    %   作为真值基准使用。所有方法都查询完整的 TerminalResponse。
+    %   isCorridorFeasible 查询兼容矩阵 A_t
+    %   isCorridorBlocked  查询空域脚印 V_t
+    %   getExternalityCost 返回实际外部性 X_t
+    %   isVehicleQualified 恒返回 true（不看 C_t 资格规则）
 
     properties (Access = private)
         responses  % containers.Map: "terminalId-styleId" -> TerminalResponse
@@ -9,7 +12,7 @@ classdef FullModelPlugin < uam.abstraction.TerminalPlugin
     end
 
     methods
-        function obj = FullModelPlugin(responses, extWeights)
+        function obj = A2Plugin(responses, extWeights)
             arguments
                 responses
                 extWeights (1,2) double = [1.0, 1.0]
@@ -44,9 +47,8 @@ classdef FullModelPlugin < uam.abstraction.TerminalPlugin
                  + obj.extWeights(2) * resp.populationExposure;
         end
 
-        function tf = isVehicleQualified(obj, terminalId, styleId, vehicleClass)
-            resp = obj.getResponse(terminalId, styleId);
-            tf = any(resp.acceptedVehicleClasses == vehicleClass);
+        function tf = isVehicleQualified(~, ~, ~, ~)
+            tf = true;  % A2 不看资格规则
         end
     end
 

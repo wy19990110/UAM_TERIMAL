@@ -27,8 +27,8 @@ classdef TestAbstraction < matlab.unittest.TestCase
                 'noiseIndex', 2.0, 'populationExposure', 50);
 
             testCase.responses = containers.Map();
-            testCase.responses('T1-fixed_north') = respNorth;
-            testCase.responses('T1-fixed_south') = respSouth;
+            testCase.responses(uam.core.makeKey("T1", "fixed_north")) = respNorth;
+            testCase.responses(uam.core.makeKey("T1", "fixed_south")) = respSouth;
         end
     end
 

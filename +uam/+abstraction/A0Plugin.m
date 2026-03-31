@@ -44,9 +44,9 @@ classdef A0Plugin < uam.abstraction.TerminalPlugin
         end
     end
 
-    methods (Access = private)
+    methods (Access = protected)
         function resp = getResponse(obj, terminalId, styleId)
-            key = char(terminalId + "-" + styleId);
+            key = uam.core.makeKey(terminalId, styleId);
             resp = obj.responses(key);
         end
     end

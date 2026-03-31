@@ -123,14 +123,26 @@ classdef TestCore < matlab.unittest.TestCase
         function testNetworkDesign(testCase)
             ca = containers.Map({'N', 'S', 'B'}, {true, false, true});
             ss = containers.Map({'T1'}, {'fixed_north'});
-            fa = containers.Map({'N', 'B'}, {3.0, 2.0});
-            design = uam.core.NetworkDesign(ca, ss, fa, 0);
+            % flowAllocation 现在按场景分层
+            w1Flow = containers.Map({'N', 'B'}, {3.0, 2.0});
+            fa = containers.Map({'w1'}, {w1Flow});
+            unmet = containers.Map({'w1'}, {0});
+            design = uam.core.NetworkDesign(ca, ss, fa, unmet);
 
             active = design.activeCorridors();
             testCase.verifyEqual(numel(active), 2);
             testCase.verifyTrue(any(active == "N"));
             testCase.verifyTrue(any(active == "B"));
             testCase.verifyFalse(any(active == "S"));
+
+            % 测试 getFlow
+            testCase.verifyEqual(design.getFlow("w1", "N"), 3.0);
+            testCase.verifyEqual(design.getFlow("w1", "B"), 2.0);
+            testCase.verifyEqual(design.getFlow("w1", "S"), 0);
+            testCase.verifyEqual(design.getFlow("w2", "N"), 0);  % 不存在的场景
+
+            % 测试 getUnmet
+            testCase.verifyEqual(design.getUnmet("w1"), 0);
         end
 
         function testTopologyEquals(testCase)

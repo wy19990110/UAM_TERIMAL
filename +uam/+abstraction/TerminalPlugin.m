@@ -31,4 +31,26 @@ classdef (Abstract) TerminalPlugin < handle
         % 航空器类别是否被接受（C_t）
         tf = isVehicleQualified(obj, terminalId, styleId, vehicleClass)
     end
+
+    methods
+        function [feasVec, blockVec] = getCorridorVectors(obj, terminalId, styleId, corridorIds)
+            % getCorridorVectors 批量查询走廊可行性和阻塞状态
+            %
+            %   输入:
+            %     terminalId  - 终端 ID
+            %     styleId     - 样式 ID
+            %     corridorIds - 走廊 ID 数组 (string)
+            %
+            %   输出:
+            %     feasVec  - logical 向量，是否可连接
+            %     blockVec - logical 向量，是否被阻塞
+            n = numel(corridorIds);
+            feasVec = true(n, 1);
+            blockVec = false(n, 1);
+            for i = 1:n
+                feasVec(i) = obj.isCorridorFeasible(terminalId, styleId, corridorIds(i));
+                blockVec(i) = obj.isCorridorBlocked(terminalId, styleId, corridorIds(i));
+            end
+        end
+    end
 end
