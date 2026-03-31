@@ -1,0 +1,24 @@
+# MATLAB 生成文件
+*.asv
+*.m~
+*.mex*
+*.mlappinstall
+*.mltbx
+slprj/
+*.slxc
+
+# 结果输出（大文件，不入库）
+results/
+
+# 临时文件
+*.mat.bak
+*.log
+*.tmp
+
+# OS 文件
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
