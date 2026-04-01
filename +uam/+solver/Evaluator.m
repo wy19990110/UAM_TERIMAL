@@ -1,23 +1,19 @@
 classdef Evaluator
     % Evaluator 在指定插件（真值模型）下评估网络设计的目标函数值
     %
-    %   J(y; φ) = Σ activationCost(e)*x(e)
-    %           + Σ_ω p_ω * [Σ cost(e)*f(e,ω) + penalty*unmet(ω)]
-    %           + Σ_ω p_ω * Σ_t externalityCost(t, selectedStyle)
+    %   J(y; φ) = F^route(x)
+    %           + Σ_ω p_ω [Σ c_e f_e^ω + Σ_t Ψ_t(λ_t; φ_t) + κ·unmet^ω]
 
     methods (Static)
-        function [J, breakdown] = evaluate(design, plugin, instance)
+        function [J, breakdown] = evaluate(design, plugin, instance, eta, xi)
             % evaluate 计算设计方案在给定插件下的目标函数值
-            %
-            %   输入:
-            %     design   - NetworkDesign
-            %     plugin   - TerminalPlugin（通常是 FullModelPlugin）
-            %     instance - NetworkInstance
-            %
-            %   输出:
-            %     J         - 总目标函数值
-            %     breakdown - struct: routeCost, operationalCost,
-            %                         externalityCost, unmetCost, total
+            arguments
+                design
+                plugin
+                instance
+                eta (1,1) double = 1.0
+                xi (1,1) double = 0
+            end
 
             nE = instance.numCorridors();
             nW = instance.numScenarios();
@@ -32,20 +28,20 @@ classdef Evaluator
                 end
             end
 
-            % 场景加权运营成本
+            % 场景加权运营成本 + 终端广义成本
             operationalCost = 0;
             unmetCost = 0;
+            terminalCost = 0;
+
             for w = 1:nW
                 scen = instance.scenarios(w);
                 pw = scen.probability;
 
-                % 流量成本
+                % 走廊流量成本
                 for e = 1:nE
                     corr = instance.corridors(e);
                     flow = design.getFlow(scen.id, corr.id);
 
-                    % 检查走廊在选定样式下是否真正可用
-                    % 如果不可用但有流量，加巨额惩罚
                     isUsable = true;
                     endpoints = [corr.origin, corr.destination];
                     for ep = endpoints
@@ -62,7 +58,6 @@ classdef Evaluator
                     if isUsable
                         operationalCost = operationalCost + pw * corr.cost * flow;
                     else
-                        % 走廊在真值模型下不可用，流量视为无效，需求转为未满足
                         unmetCost = unmetCost + pw * instance.unmetPenalty * flow;
                     end
                 end
@@ -70,22 +65,61 @@ classdef Evaluator
                 % 未满足需求惩罚
                 u = design.getUnmet(scen.id);
                 unmetCost = unmetCost + pw * instance.unmetPenalty * u;
-            end
 
-            % 外部性成本
-            externalityCost = 0;
-            for t = 1:instance.numTerminals()
-                tid = instance.terminals(t);
-                if design.styleSelection.isKey(char(tid))
+                % 终端广义成本 Ψ_t
+                for t = 1:instance.numTerminals()
+                    tid = instance.terminals(t);
+                    if ~design.styleSelection.isKey(char(tid)), continue; end
                     sid = design.styleSelection(char(tid));
-                    externalityCost = externalityCost + plugin.getExternalityCost(tid, sid);
+                    resp = plugin.getResponse(tid, sid);
+
+                    % 计算接口级负荷
+                    nH = numel(resp.interfaceIds);
+                    lambdaVec = zeros(nH, 1);
+                    for h = 1:nH
+                        hId = resp.interfaceIds(h);
+                        for e = 1:nE
+                            corr = instance.corridors(e);
+                            if (corr.origin == tid || corr.destination == tid) && corr.id == hId
+                                lambdaVec(h) = lambdaVec(h) + design.getFlow(scen.id, corr.id);
+                            end
+                        end
+                    end
+
+                    % L_t = Σ_h λ_h · D_{t,h}(λ_h)
+                    Lt = resp.computeLtPerInterface(lambdaVec);
+                    if isinf(Lt), Lt = instance.unmetPenalty * sum(lambdaVec); end
+
+                    % X_t = X̄_t + Σ_h χ_h · λ_h
+                    Xt = resp.baseExternality;
+                    for h = 1:nH
+                        if h <= numel(resp.marginalExtCoeff)
+                            Xt = Xt + resp.marginalExtCoeff(h) * lambdaVec(h);
+                        end
+                    end
+
+                    psiT = eta * Lt / resp.refTotalDelay + xi * Xt / resp.refExternality;
+                    terminalCost = terminalCost + pw * psiT;
                 end
             end
 
-            J = routeCost + operationalCost + unmetCost + externalityCost;
+            % 旧的外部性成本保留为独立项（向后兼容，xi=0 时为主要外部性来源）
+            externalityCost = 0;
+            if xi == 0
+                for t = 1:instance.numTerminals()
+                    tid = instance.terminals(t);
+                    if design.styleSelection.isKey(char(tid))
+                        sid = design.styleSelection(char(tid));
+                        externalityCost = externalityCost + plugin.getExternalityCost(tid, sid);
+                    end
+                end
+            end
+
+            J = routeCost + operationalCost + unmetCost + terminalCost + externalityCost;
 
             breakdown.routeCost = routeCost;
             breakdown.operationalCost = operationalCost;
+            breakdown.terminalCost = terminalCost;
             breakdown.externalityCost = externalityCost;
             breakdown.unmetCost = unmetCost;
             breakdown.total = J;

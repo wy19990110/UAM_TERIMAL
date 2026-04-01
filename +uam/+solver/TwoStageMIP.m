@@ -157,198 +157,147 @@ classdef TwoStageMIP < handle
             end
 
             % ============ C5/C6/C7: 终端负荷 + 容量 + Ψ_t ============
-            % 对每个终端，查询 plugin 获取 Ψ 断点，构建分段线性约束
-            obj.buildTerminalConstraints(prob, f, psi, nT, nE, nW, inst, styleIds);
-
-            obj.prob = prob;
-        end
-
-        function buildTerminalConstraints(obj, prob, f, psi, nT, nE, nW, inst, styleIds)
-            % 为每个终端构建 C5(负荷链接) + C6(容量) + C7(Ψ分段线性化)
-
+            % 内联构建（optimproblem 是值类型，不能通过子方法修改）
             for t = 1:nT
                 tid = inst.terminals(t);
-                % 取第一个样式（z 外生固定时只有一个）
                 sid = styleIds{t}(1);
 
-                % 获取 Ψ 断点
                 [bpData, valData, isPerInterface] = ...
                     obj.plugin.getPsiBreakpoints(tid, sid, obj.eta, obj.xi, obj.numPwlPts);
+                mu_t = obj.plugin.getCapacity(tid, sid);
 
-                mu = obj.plugin.getCapacity(tid, sid);
+                % 预收集该终端关联的走廊索引
+                corrIdxAll = [];
+                for e = 1:nE
+                    corr = inst.corridors(e);
+                    if corr.origin == tid || corr.destination == tid
+                        corrIdxAll(end+1) = e; %#ok<AGROW>
+                    end
+                end
 
                 if ~isPerInterface
                     % === A0: 总负荷一元模式 ===
-                    obj.buildA0TerminalConstraints( ...
-                        prob, f, psi, t, tid, nE, nW, inst, bpData, valData, mu);
+                    for w = 1:nW
+                        % 总负荷表达式（用索引直接构建，不用 optimexpr(0) 累加）
+                        if isempty(corrIdxAll)
+                            prob.Constraints.(sprintf('psiZero_T%d_w%d', t, w)) = psi(t,w) == 0;
+                            continue;
+                        end
+                        loadExpr = sum(f(corrIdxAll, w));
+
+                        prob.Constraints.(sprintf('capTotal_T%d_w%d', t, w)) = loadExpr <= mu_t;
+
+                        bp = bpData; vals = valData;
+                        m = numel(bp);
+                        if m < 2
+                            prob.Constraints.(sprintf('psiZero_T%d_w%d', t, w)) = psi(t,w) == 0;
+                            continue;
+                        end
+
+                        segW = diff(bp); segS = diff(vals) ./ max(segW, 1e-12);
+                        nSeg = m - 1;
+                        delta = optimvar(sprintf('dA0_T%d_w%d', t, w), nSeg, 1, 'LowerBound', 0);
+                        ybin = optimvar(sprintf('yA0_T%d_w%d', t, w), nSeg, 1, ...
+                            'Type', 'integer', 'LowerBound', 0, 'UpperBound', 1);
+
+                        for j = 1:nSeg
+                            prob.Constraints.(sprintf('dBnd_T%d_w%d_j%d', t, w, j)) = delta(j) <= segW(j) * ybin(j);
+                        end
+                        for j = 1:nSeg-1
+                            prob.Constraints.(sprintf('yOrd_T%d_w%d_j%d', t, w, j)) = ybin(j) >= ybin(j+1);
+                        end
+                        prob.Constraints.(sprintf('ldLnk_T%d_w%d', t, w)) = loadExpr == bp(1) + sum(delta);
+                        prob.Constraints.(sprintf('psiLnk_T%d_w%d', t, w)) = psi(t,w) == vals(1) + sum(segS(:) .* delta);
+                    end
                 else
-                    % === A1/A2/Full: 按接口分解模式 ===
-                    obj.buildPerInterfaceTerminalConstraints( ...
-                        prob, f, psi, t, tid, sid, nE, nW, inst, bpData, valData, mu);
-                end
-            end
-        end
+                    % === A1/A2/Full: 按接口分解 ===
+                    resp = obj.plugin.getResponse(tid, sid);
+                    nH = numel(resp.interfaceIds);
 
-        function buildA0TerminalConstraints(obj, prob, f, psi, t, tid, nE, nW, inst, bp, vals, mu)
-            % A0: 总负荷 → 一元 Ψ_t 分段线性化
-            % bp, vals 是向量（总负荷断点 → Ψ 值）
-
-            for w = 1:nW
-                % 总负荷 = Σ 流经该终端的走廊流量
-                flowExpr = obj.buildTotalLoadExpr(f, t, tid, nE, w, inst);
-
-                % C6a: 总容量上界
-                prob.Constraints.(sprintf('capTotal_T%d_w%d', t, w)) = ...
-                    flowExpr <= mu;
-
-                % C7: 分段线性化（上方弦近似 = 逐段线性约束）
-                % 对凸函数，用断点间的线性插值
-                m = numel(bp);
-                for j = 1:m-1
-                    if bp(j+1) - bp(j) < 1e-12, continue; end
-                    slope = (vals(j+1) - vals(j)) / (bp(j+1) - bp(j));
-                    % psi >= slope * (lambda - bp_j) + vals_j  （凸下界切线）
-                    % 但我们要上方弦近似。对 min 问题，用切线是低估。
-                    % 所以改用：psi 直接通过 SOS2 插值。
-                    % 简化实现：对小规模用多段线性约束上界
-                end
-
-                % 简化 SOS2 实现：用增量式
-                % delta_j = lambda 在第 j 段的增量
-                % psi = Σ slope_j * delta_j + vals(1)
-                m = numel(bp);
-                if m < 2
-                    prob.Constraints.(sprintf('psiZero_T%d_w%d', t, w)) = psi(t,w) == 0;
-                    continue;
-                end
-
-                segWidths = diff(bp);
-                segSlopes = diff(vals) ./ max(segWidths, 1e-12);
-                nSeg = m - 1;
-
-                delta = optimvar(sprintf('dA0_T%d_w%d', t, w), nSeg, 1, 'LowerBound', 0);
-                y = optimvar(sprintf('yA0_T%d_w%d', t, w), nSeg, 1, 'Type', 'integer', ...
-                    'LowerBound', 0, 'UpperBound', 1);
-
-                % delta_j <= segWidth_j * y_j
-                for j = 1:nSeg
-                    prob.Constraints.(sprintf('dBnd_T%d_w%d_j%d', t, w, j)) = ...
-                        delta(j) <= segWidths(j) * y(j);
-                end
-
-                % 排序：y_j >= y_{j+1}（保证从左到右填充）
-                for j = 1:nSeg-1
-                    prob.Constraints.(sprintf('yOrd_T%d_w%d_j%d', t, w, j)) = ...
-                        y(j) >= y(j+1);
-                end
-
-                % 负荷链接：flowExpr = bp(1) + Σ delta_j
-                prob.Constraints.(sprintf('loadLink_T%d_w%d', t, w)) = ...
-                    flowExpr == bp(1) + sum(delta);
-
-                % Ψ 链接：psi = vals(1) + Σ slope_j * delta_j
-                prob.Constraints.(sprintf('psiLink_T%d_w%d', t, w)) = ...
-                    psi(t,w) == vals(1) + sum(segSlopes(:) .* delta);
-            end
-        end
-
-        function buildPerInterfaceTerminalConstraints(obj, prob, f, psi, t, tid, sid, nE, nW, inst, bpCell, valCell, mu)
-            % A1/A2/Full: 按接口分解 → 每接口单独分段线性化
-
-            resp = obj.plugin.getResponse(tid, sid);
-            nH = numel(resp.interfaceIds);
-
-            for w = 1:nW
-                psiExpr = optimexpr(0);  % 累计 Ψ_t
-
-                totalLoadExpr = optimexpr(0);
-
-                for h = 1:nH
-                    hId = resp.interfaceIds(h);
-                    bp = bpCell{h};
-                    vals = valCell{h};
-
-                    % C5: λ_{t,h} = Σ f_e 流经该接口的走廊
-                    loadExpr = obj.buildInterfaceLoadExpr(f, t, tid, hId, nE, w, inst);
-
-                    totalLoadExpr = totalLoadExpr + loadExpr;
-
-                    % C6b: 接口有效域
-                    capMax = resp.interfaceCapMax(h);
-                    prob.Constraints.(sprintf('capIF_T%d_h%d_w%d', t, h, w)) = ...
-                        loadExpr <= capMax;
-
-                    % C7: 每接口分段线性化
-                    m = numel(bp);
-                    if m < 2
-                        continue;
+                    % 预收集每接口关联的走廊索引
+                    corrIdxPerH = cell(nH, 1);
+                    for h = 1:nH
+                        hId = resp.interfaceIds(h);
+                        corrIdxPerH{h} = [];
+                        for e = 1:nE
+                            corr = inst.corridors(e);
+                            if (corr.origin == tid || corr.destination == tid) && corr.id == hId
+                                corrIdxPerH{h}(end+1) = e;
+                            end
+                        end
                     end
 
-                    segWidths = diff(bp);
-                    segSlopes = diff(vals) ./ max(segWidths, 1e-12);
-                    nSeg = m - 1;
+                    for w = 1:nW
+                        % 收集所有接口的 psi 贡献（用数组索引而非 optimexpr 累加）
+                        psiParts = {};  % cell array of optimization expressions
 
-                    delta = optimvar(sprintf('d_T%d_h%d_w%d', t, h, w), nSeg, 1, 'LowerBound', 0);
-                    y = optimvar(sprintf('y_T%d_h%d_w%d', t, h, w), nSeg, 1, 'Type', 'integer', ...
-                        'LowerBound', 0, 'UpperBound', 1);
+                        for h = 1:nH
+                            bp = bpData{h}; vals = valData{h};
 
-                    for j = 1:nSeg
-                        prob.Constraints.(sprintf('dBnd_T%d_h%d_w%d_j%d', t, h, w, j)) = ...
-                            delta(j) <= segWidths(j) * y(j);
+                            % C5: 接口负荷 = 走廊流量
+                            hIdx = corrIdxPerH{h};
+                            if isempty(hIdx)
+                                loadExpr = 0;
+                            else
+                                loadExpr = sum(f(hIdx, w));
+                            end
+
+                            % C6b: 接口有效域（仅当有匹配走廊时）
+                            capMax = resp.interfaceCapMax(h);
+                            if ~isempty(hIdx)
+                                prob.Constraints.(sprintf('capIF_T%d_h%d_w%d', t, h, w)) = loadExpr <= capMax;
+                            end
+
+                            % C7: 分段线性化
+                            m = numel(bp);
+                            if m < 2, continue; end
+
+                            segW = diff(bp); segS = diff(vals) ./ max(segW, 1e-12);
+                            nSeg = m - 1;
+                            delta = optimvar(sprintf('d_T%d_h%d_w%d', t, h, w), nSeg, 1, 'LowerBound', 0);
+                            ybin = optimvar(sprintf('y_T%d_h%d_w%d', t, h, w), nSeg, 1, ...
+                                'Type', 'integer', 'LowerBound', 0, 'UpperBound', 1);
+
+                            for j = 1:nSeg
+                                prob.Constraints.(sprintf('dBnd_T%d_h%d_w%d_j%d', t, h, w, j)) = delta(j) <= segW(j) * ybin(j);
+                            end
+                            for j = 1:nSeg-1
+                                prob.Constraints.(sprintf('yOrd_T%d_h%d_w%d_j%d', t, h, w, j)) = ybin(j) >= ybin(j+1);
+                            end
+                            if ~isempty(hIdx)
+                                prob.Constraints.(sprintf('ldLnk_T%d_h%d_w%d', t, h, w)) = loadExpr == bp(1) + sum(delta);
+                            else
+                                % 无匹配走廊：强制 delta=0
+                                prob.Constraints.(sprintf('ldLnk_T%d_h%d_w%d', t, h, w)) = sum(delta) == 0;
+                            end
+                            psiParts{end+1} = vals(1) + sum(segS(:) .* delta); %#ok<AGROW>
+                        end
+
+                        % C6a: 总容量（用预收集的索引）
+                        if ~isempty(corrIdxAll)
+                            prob.Constraints.(sprintf('capTotal_T%d_w%d', t, w)) = sum(f(corrIdxAll, w)) <= mu_t;
+                        end
+
+                        % 基础外部性常数项
+                        baseExtCost = 0;
+                        if obj.xi > 0
+                            baseExtCost = obj.xi * resp.baseExternality / resp.refExternality;
+                        end
+                        % 汇总 psi: 用 sum 而非 optimexpr 累加
+                        if isempty(psiParts)
+                            prob.Constraints.(sprintf('psiLnk_T%d_w%d', t, w)) = psi(t,w) == baseExtCost;
+                        else
+                            totalPsi = psiParts{1};
+                            for pp = 2:numel(psiParts)
+                                totalPsi = totalPsi + psiParts{pp};
+                            end
+                            prob.Constraints.(sprintf('psiLnk_T%d_w%d', t, w)) = psi(t,w) == totalPsi + baseExtCost;
+                        end
                     end
-
-                    for j = 1:nSeg-1
-                        prob.Constraints.(sprintf('yOrd_T%d_h%d_w%d_j%d', t, h, w, j)) = ...
-                            y(j) >= y(j+1);
-                    end
-
-                    % 负荷链接
-                    prob.Constraints.(sprintf('ldLnk_T%d_h%d_w%d', t, h, w)) = ...
-                        loadExpr == bp(1) + sum(delta);
-
-                    % 接口 Ψ 贡献
-                    psiH = vals(1) + sum(segSlopes(:) .* delta);
-                    psiExpr = psiExpr + psiH;
-                end
-
-                % C6a: 总容量
-                prob.Constraints.(sprintf('capTotal_T%d_w%d', t, w)) = ...
-                    totalLoadExpr <= mu;
-
-                % 加 baseExternality 常数项（ξ > 0 时）
-                baseExtCost = 0;
-                if obj.xi > 0
-                    resp2 = obj.plugin.getResponse(tid, sid);
-                    baseExtCost = obj.xi * resp2.baseExternality / resp2.refExternality;
-                end
-
-                % Ψ_t = 延误项 + 基础外部性
-                prob.Constraints.(sprintf('psiLink_T%d_w%d', t, w)) = ...
-                    psi(t,w) == psiExpr + baseExtCost;
-            end
-        end
-
-        function expr = buildTotalLoadExpr(~, f, t, tid, nE, w, inst)
-            % 构建终端 t 在场景 w 的总负荷表达式 = Σ 关联走廊流量
-            expr = optimexpr(0);
-            for e = 1:nE
-                corr = inst.corridors(e);
-                if corr.origin == tid || corr.destination == tid
-                    expr = expr + f(e, w);
                 end
             end
-        end
 
-        function expr = buildInterfaceLoadExpr(~, f, t, tid, hId, nE, w, inst)
-            % 构建终端 t 的接口 hId 在场景 w 的负荷
-            % = Σ 走廊 e 如果 e 的 ID == hId 且 e 关联终端 t
-            expr = optimexpr(0);
-            for e = 1:nE
-                corr = inst.corridors(e);
-                if (corr.origin == tid || corr.destination == tid) && corr.id == hId
-                    expr = expr + f(e, w);
-                end
-            end
+            obj.prob = prob;
         end
 
         function styleIds = getAllStyleIds(obj)

@@ -52,7 +52,7 @@ classdef RegretFramework < handle
             trueSol = trueMIP.solve();
 
             [jStar, trueBreakdown] = uam.solver.Evaluator.evaluate( ...
-                trueSol.design, fullPlugin, obj.instance);
+                trueSol.design, fullPlugin, obj.instance, obj.eta, obj.xi);
 
             trueResult.design = trueSol.design;
             trueResult.objective = jStar;
@@ -74,11 +74,11 @@ classdef RegretFramework < handle
 
                 % 在抽象模型下的目标值
                 [jAbstract, ~] = uam.solver.Evaluator.evaluate( ...
-                    absSol.design, plugin, obj.instance);
+                    absSol.design, plugin, obj.instance, obj.eta, obj.xi);
 
                 % 在真值模型下评估抽象设计
                 [jTrue, ~] = uam.solver.Evaluator.evaluate( ...
-                    absSol.design, fullPlugin, obj.instance);
+                    absSol.design, fullPlugin, obj.instance, obj.eta, obj.xi);
 
                 delta = jTrue - jStar;
                 topoMatch = trueSol.design.topologyEquals(absSol.design);

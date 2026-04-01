@@ -87,21 +87,30 @@ classdef DelayModel
             % fitDelayParamsPerInterface 对每个接口拟合延误参数
             %
             %   每接口分配等比容量，独立拟合 D_{t,h}
+            %   如果有 interfaceDirections，"detour" 接口延误放大 3 倍
             nH = numel(styleConfig.feasibleCorridors);
             if nH == 0
                 alphas = []; betas = []; capMaxes = []; return;
             end
 
-            % 每接口容量 = 总容量 / 接口数（均分）
             muPerH = mu / nH;
             capMaxes = repmat(muPerH, nH, 1);
             alphas = zeros(nH, 1);
             betas = zeros(nH, 1);
 
             for h = 1:nH
-                % 为每接口创建虚拟 styleConfig（单接口）
                 virtualConfig = styleConfig;
                 virtualConfig.padCount = max(1, styleConfig.padCount / nH);
+
+                % 根据接口方向调整延误特性
+                delayScale = 1.0;
+                if ~isempty(styleConfig.interfaceDirections) && h <= numel(styleConfig.interfaceDirections)
+                    dir = styleConfig.interfaceDirections(h);
+                    if dir == "detour"
+                        delayScale = 3.0;  % 绕行接口延误放大
+                        virtualConfig.ringRadiusNm = styleConfig.ringRadiusNm * 2;
+                    end
+                end
 
                 if muPerH <= 0
                     alphas(h) = Inf; betas(h) = 1; continue;
@@ -112,7 +121,7 @@ classdef DelayModel
                 delays = zeros(size(lambdas));
                 for i = 1:numel(lambdas)
                     delays(i) = uam.terminal.DelayModel.computeRawDelay( ...
-                        virtualConfig, lambdas(i), muPerH);
+                        virtualConfig, lambdas(i), muPerH) * delayScale;
                 end
 
                 ratios = lambdas ./ (muPerH - lambdas);
