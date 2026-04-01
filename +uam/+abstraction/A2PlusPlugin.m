@@ -50,6 +50,27 @@ classdef A2PlusPlugin < uam.abstraction.TerminalPlugin
             resp = obj.getResponse(terminalId, styleId);
             tf = any(resp.acceptedVehicleClasses == vehicleClass);
         end
+
+        function [bp, vals, isPerInterface] = getPsiBreakpoints(obj, terminalId, styleId, eta, xiVal, numPts)
+            % A2+: 同 A2（按接口分解 + X_t），额外受资格规则约束
+            arguments
+                obj; terminalId; styleId; eta; xiVal; numPts = 8
+            end
+            resp = obj.getResponse(terminalId, styleId);
+            nH = numel(resp.interfaceIds);
+            bp = cell(nH, 1);
+            vals = cell(nH, 1);
+            for h = 1:nH
+                [bp{h}, Lvals] = resp.computePsiBreakpoints(h, numPts);
+                chiH = 0;
+                if h <= numel(resp.marginalExtCoeff)
+                    chiH = resp.marginalExtCoeff(h);
+                end
+                vals{h} = eta * Lvals / resp.refTotalDelay ...
+                         + xiVal * chiH * bp{h} / resp.refExternality;
+            end
+            isPerInterface = true;
+        end
     end
 
     methods (Access = protected)

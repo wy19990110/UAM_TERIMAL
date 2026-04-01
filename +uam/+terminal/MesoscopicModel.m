@@ -1,33 +1,41 @@
 classdef MesoscopicModel
     % MesoscopicModel 终端区中观模型（排队论参数化版本）
     %
-    %   基于排队论计算 (A, μ, D, V, X, C)：
-    %     - 容量 μ: min(起降坪吞吐, 等待位约束)
-    %     - 延误 D: M/D/c 排队 + 环形等待 + 合流延误，拟合为参数化函数
-    %     - 空域脚印 V: 几何计算
-    %     - 外部性 X: 噪声和人口暴露
-    %     - 接口 A 和规则 C: 从样式配置直接传递
+    %   基于排队论计算完整终端响应 R_t = (A, μ, D, V, X, C)，
+    %   包括接口级延误参数和 A0 用的聚合延误。
 
     methods
         function resp = computeResponse(~, styleConfig, ~, ~)
             % computeResponse 从终端样式配置生成完整终端响应
-            %
-            %   输入:
-            %     styleConfig   - TerminalStyleConfig
-            %     arrivalRate   - 到达率（用于延误参数拟合采样范围，0 使用默认）
-            %     directionDist - 方向分布（预留，当前未使用）
-            %
-            %   输出:
-            %     resp - TerminalResponse
 
-            % μ: 容量计算
+            % μ: 容量仅由起降坪决定
             mu = uam.terminal.MesoscopicModel.computeCapacity(styleConfig);
 
-            % D: 延误参数拟合
+            % D: 聚合延误参数拟合（向后兼容）
             [alpha, beta] = uam.terminal.DelayModel.fitDelayParams(styleConfig, mu);
+
+            % D_{t,h}: 接口级延误参数拟合
+            nH = numel(styleConfig.feasibleCorridors);
+            [ifAlphas, ifBetas, ifCapMax] = ...
+                uam.terminal.DelayModel.fitDelayParamsPerInterface(styleConfig, mu);
+
+            % D_agg: A0 用的聚合延误标定
+            [aggAlpha, aggBeta] = ...
+                uam.terminal.DelayModel.fitAggDelayParams(styleConfig, mu);
 
             % V: 空域脚印
             [blocked, radius] = uam.terminal.FootprintCalc.compute(styleConfig);
+
+            % L^ref, X^ref: 无量纲化参考值
+            % L^ref = 基准负荷(50%容量)下的总延误量
+            refLoad = mu * 0.5;
+            refDelay = aggAlpha * (refLoad / (mu - refLoad))^aggBeta;
+            Lref = max(refLoad * refDelay, 1e-6);
+
+            % X^ref = baseExternality + 均匀负荷下的边际外部性贡献
+            mec = styleConfig.marginalExtCoeff;
+            if isempty(mec), mec = zeros(nH, 1); end
+            Xref = max(styleConfig.baseExternality + sum(mec) * refLoad / max(nH, 1), 1e-6);
 
             % 构建响应
             resp = uam.core.TerminalResponse( ...
@@ -41,21 +49,27 @@ classdef MesoscopicModel
                 'populationExposure', styleConfig.populationExposure, ...
                 'acceptedVehicleClasses', styleConfig.acceptedVehicleClasses, ...
                 'closureWindThresholdKt', styleConfig.closureWindThresholdKt, ...
-                'requiresILS', styleConfig.requiresILS);
+                'requiresILS', styleConfig.requiresILS, ...
+                ... % 主模型层新增
+                'interfaceIds', styleConfig.feasibleCorridors, ...
+                'interfaceDelayAlpha', ifAlphas, ...
+                'interfaceDelayBeta', ifBetas, ...
+                'interfaceCapMax', ifCapMax, ...
+                'marginalExtCoeff', mec, ...
+                'baseExternality', styleConfig.baseExternality, ...
+                'aggDelayAlpha', aggAlpha, ...
+                'aggDelayBeta', aggBeta, ...
+                'refTotalDelay', Lref, ...
+                'refExternality', Xref);
         end
     end
 
     methods (Static)
         function mu = computeCapacity(styleConfig)
-            % computeCapacity 计算终端区容量 (ops/hour)
-            %
-            %   μ = min(起降坪吞吐, 等待位约束吞吐)
-            %   起降坪吞吐 = padCount * 3600 / serviceTime
-            %   等待位约束 = waitingSlots * 3600 / serviceTime（缓冲限制）
-
-            padThroughput = styleConfig.padCount * 3600 / styleConfig.serviceTime;
-            waitThroughput = styleConfig.waitingSlots * 3600 / styleConfig.serviceTime;
-            mu = min(padThroughput, waitThroughput);
+            % computeCapacity 容量仅由服务资源（起降坪）决定
+            %   μ = padCount * 3600 / serviceTime
+            %   waiting slots 不参与 μ 计算，改为影响 D(λ) 形状
+            mu = styleConfig.padCount * 3600 / styleConfig.serviceTime;
         end
     end
 end

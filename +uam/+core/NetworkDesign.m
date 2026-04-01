@@ -12,6 +12,10 @@ classdef NetworkDesign
         styleSelection       % containers.Map (char -> char)
         flowAllocation       % containers.Map (char -> containers.Map(char -> double))
         unmetDemand          % containers.Map (char -> double) 或标量
+
+        % === 主模型层新增 ===
+        terminalLoads          % containers.Map: terminalId -> containers.Map(interfaceId -> load)
+        terminalPsiCost        % containers.Map: terminalId -> double (Ψ_t 值)
     end
 
     methods

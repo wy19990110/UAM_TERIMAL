@@ -42,6 +42,17 @@ classdef A0Plugin < uam.abstraction.TerminalPlugin
         function tf = isVehicleQualified(~, ~, ~, ~)
             tf = true;  % A0 没有资格信息
         end
+
+        function [bp, vals, isPerInterface] = getPsiBreakpoints(obj, terminalId, styleId, eta, ~, numPts)
+            % A0: 用总负荷一元 D_agg 函数，不区分接口
+            arguments
+                obj; terminalId; styleId; eta; ~; numPts = 8
+            end
+            resp = obj.getResponse(terminalId, styleId);
+            [bp, Lvals] = resp.computePsiBreakpoints(0, numPts);  % hIdx=0 聚合模式
+            vals = eta * Lvals / resp.refTotalDelay;  % 无量纲化
+            isPerInterface = false;
+        end
     end
 
     methods (Access = protected)

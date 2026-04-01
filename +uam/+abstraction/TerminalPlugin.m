@@ -30,6 +30,12 @@ classdef (Abstract) TerminalPlugin < handle
 
         % 航空器类别是否被接受（C_t）
         tf = isVehicleQualified(obj, terminalId, styleId, vehicleClass)
+
+        % 获取 Ψ_t 的分段线性断点（用于 MIP 构建）
+        %   isPerInterface = false (A0): bp/vals 为总负荷一元函数
+        %   isPerInterface = true (A1/A2/Full): bp/vals 为 cell 数组，每接口一组
+        %   xiVal: 外部性权重（A0/A1 传 0）
+        [bp, vals, isPerInterface] = getPsiBreakpoints(obj, terminalId, styleId, eta, xiVal, numPts)
     end
 
     methods

@@ -74,11 +74,90 @@ classdef DelayModel
             ringCircuit = 2 * pi * styleConfig.ringRadiusNm * 60;  % 海里 → 秒（假设60kt）
             dRing = ringCircuit * rho / (1 - rho + 0.1);  % 加 0.1 防止除零
 
-            % 3. 合流延误（简化：与等待位占用率成正比）
+            % 3. 合流延误（含 waitingSlots 缓冲饱和效应）
+            %    缓冲占用率越高，延误越陡（非线性放大）
             waitingOccupancy = min(1, arrivalRate * serviceTime / 3600 / styleConfig.waitingSlots);
-            dMerge = 10 * waitingOccupancy;  % 秒
+            saturationFactor = 1 / (1 - waitingOccupancy + 0.05);  % 饱和放大
+            dMerge = 10 * waitingOccupancy * saturationFactor;  % 秒
 
             d = dPad + dRing + dMerge;
+        end
+
+        function [alphas, betas, capMaxes] = fitDelayParamsPerInterface(styleConfig, mu)
+            % fitDelayParamsPerInterface 对每个接口拟合延误参数
+            %
+            %   每接口分配等比容量，独立拟合 D_{t,h}
+            nH = numel(styleConfig.feasibleCorridors);
+            if nH == 0
+                alphas = []; betas = []; capMaxes = []; return;
+            end
+
+            % 每接口容量 = 总容量 / 接口数（均分）
+            muPerH = mu / nH;
+            capMaxes = repmat(muPerH, nH, 1);
+            alphas = zeros(nH, 1);
+            betas = zeros(nH, 1);
+
+            for h = 1:nH
+                % 为每接口创建虚拟 styleConfig（单接口）
+                virtualConfig = styleConfig;
+                virtualConfig.padCount = max(1, styleConfig.padCount / nH);
+
+                if muPerH <= 0
+                    alphas(h) = Inf; betas(h) = 1; continue;
+                end
+
+                rhos = [0.1, 0.3, 0.5, 0.7, 0.85];
+                lambdas = rhos * muPerH;
+                delays = zeros(size(lambdas));
+                for i = 1:numel(lambdas)
+                    delays(i) = uam.terminal.DelayModel.computeRawDelay( ...
+                        virtualConfig, lambdas(i), muPerH);
+                end
+
+                ratios = lambdas ./ (muPerH - lambdas);
+                validIdx = delays > 0 & ratios > 0;
+                if sum(validIdx) < 2
+                    alphas(h) = 0.1; betas(h) = 1.0; continue;
+                end
+
+                X = [ones(sum(validIdx), 1), log(ratios(validIdx))'];
+                coeffs = X \ log(delays(validIdx))';
+                alphas(h) = exp(coeffs(1));
+                betas(h) = max(0.5, min(3.0, coeffs(2)));
+            end
+        end
+
+        function [aggAlpha, aggBeta] = fitAggDelayParams(styleConfig, mu)
+            % fitAggDelayParams 标定 A0 用的聚合延误 D_agg
+            %
+            %   在"均匀分配到各接口"条件下，用中观模型计算总延误量，
+            %   拟合 D_agg(λ_total) = aggAlpha * (λ_total/(μ-λ_total))^aggBeta
+
+            if mu <= 0
+                aggAlpha = Inf; aggBeta = 1; return;
+            end
+
+            rhos = [0.1, 0.3, 0.5, 0.7, 0.85];
+            lambdas = rhos * mu;
+            delays = zeros(size(lambdas));
+
+            for i = 1:numel(lambdas)
+                % 均匀分配到各接口后计算总延误
+                delays(i) = uam.terminal.DelayModel.computeRawDelay( ...
+                    styleConfig, lambdas(i), mu);
+            end
+
+            ratios = lambdas ./ (mu - lambdas);
+            validIdx = delays > 0 & ratios > 0;
+            if sum(validIdx) < 2
+                aggAlpha = 0.1; aggBeta = 1.0; return;
+            end
+
+            X = [ones(sum(validIdx), 1), log(ratios(validIdx))'];
+            coeffs = X \ log(delays(validIdx))';
+            aggAlpha = exp(coeffs(1));
+            aggBeta = max(0.5, min(3.0, coeffs(2)));
         end
 
         function d = mdcDelay(lambda, mu, c, serviceTime)

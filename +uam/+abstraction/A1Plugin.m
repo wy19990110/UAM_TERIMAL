@@ -41,6 +41,22 @@ classdef A1Plugin < uam.abstraction.TerminalPlugin
         function tf = isVehicleQualified(~, ~, ~, ~)
             tf = true;  % A1 没有资格信息
         end
+
+        function [bp, vals, isPerInterface] = getPsiBreakpoints(obj, terminalId, styleId, eta, ~, numPts)
+            % A1: 按接口分解 D_{t,h}，ξ=0（无外部性）
+            arguments
+                obj; terminalId; styleId; eta; ~; numPts = 8
+            end
+            resp = obj.getResponse(terminalId, styleId);
+            nH = numel(resp.interfaceIds);
+            bp = cell(nH, 1);
+            vals = cell(nH, 1);
+            for h = 1:nH
+                [bp{h}, Lvals] = resp.computePsiBreakpoints(h, numPts);
+                vals{h} = eta * Lvals / resp.refTotalDelay;
+            end
+            isPerInterface = true;
+        end
     end
 
     methods (Access = protected)

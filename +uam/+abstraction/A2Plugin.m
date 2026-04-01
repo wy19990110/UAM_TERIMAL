@@ -50,6 +50,29 @@ classdef A2Plugin < uam.abstraction.TerminalPlugin
         function tf = isVehicleQualified(~, ~, ~, ~)
             tf = true;  % A2 不看资格规则
         end
+
+        function [bp, vals, isPerInterface] = getPsiBreakpoints(obj, terminalId, styleId, eta, xiVal, numPts)
+            % A2: 按接口分解 D_{t,h} + X_t 线性项
+            arguments
+                obj; terminalId; styleId; eta; xiVal; numPts = 8
+            end
+            resp = obj.getResponse(terminalId, styleId);
+            nH = numel(resp.interfaceIds);
+            bp = cell(nH, 1);
+            vals = cell(nH, 1);
+            for h = 1:nH
+                [bp{h}, Lvals] = resp.computePsiBreakpoints(h, numPts);
+                % Ψ_h = η·L̃_{t,h} + ξ·χ_{t,h}·λ_{t,h}/X^ref
+                chiH = 0;
+                if h <= numel(resp.marginalExtCoeff)
+                    chiH = resp.marginalExtCoeff(h);
+                end
+                vals{h} = eta * Lvals / resp.refTotalDelay ...
+                         + xiVal * chiH * bp{h} / resp.refExternality;
+            end
+            % baseExternality 是常数项，在 MIP 中另加
+            isPerInterface = true;
+        end
     end
 
     methods (Access = protected)

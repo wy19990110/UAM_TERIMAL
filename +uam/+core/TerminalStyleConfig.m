@@ -32,6 +32,11 @@ classdef TerminalStyleConfig
         acceptedVehicleClasses (:,1) string = "eVTOL"
         closureWindThresholdKt (1,1) double = 30
         requiresILS         (1,1) logical = false
+
+        % === 接口级参数（主模型层新增）===
+        interfaceDirections    (:,1) string = string.empty    % 每接口方向标签
+        marginalExtCoeff       (:,1) double = []              % χ_{t,h}
+        baseExternality        (1,1) double = 0               % X̄_t
     end
 
     methods
@@ -51,6 +56,9 @@ classdef TerminalStyleConfig
             addParameter(p, 'acceptedVehicleClasses', "eVTOL");
             addParameter(p, 'closureWindThresholdKt', 30);
             addParameter(p, 'requiresILS', false);
+            addParameter(p, 'interfaceDirections', string.empty);
+            addParameter(p, 'marginalExtCoeff', []);
+            addParameter(p, 'baseExternality', 0);
             parse(p, styleId, varargin{:});
 
             fields = fieldnames(p.Results);
