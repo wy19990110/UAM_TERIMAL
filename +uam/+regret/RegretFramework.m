@@ -12,18 +12,24 @@ classdef RegretFramework < handle
         instance        % NetworkInstance
         model           % MesoscopicModel
         extWeights      (1,2) double = [1.0, 1.0]
+        eta             (1,1) double = 1.0    % 延误权重
+        xi              (1,1) double = 0      % 外部性权重
     end
 
     methods
-        function obj = RegretFramework(instance, model, extWeights)
+        function obj = RegretFramework(instance, model, extWeights, eta, xi)
             arguments
                 instance
                 model
                 extWeights (1,2) double = [1.0, 1.0]
+                eta (1,1) double = 1.0
+                xi (1,1) double = 0
             end
             obj.instance = instance;
             obj.model = model;
             obj.extWeights = extWeights;
+            obj.eta = eta;
+            obj.xi = xi;
         end
 
         function [results, trueResult] = computeRegret(obj, levels)
@@ -42,7 +48,7 @@ classdef RegretFramework < handle
             % 2. 真值求解
             fullPlugin = uam.abstraction.buildPlugin( ...
                 uam.core.AbstractionLevel.Full, responses, obj.extWeights);
-            trueMIP = uam.solver.TwoStageMIP(obj.instance, fullPlugin);
+            trueMIP = uam.solver.TwoStageMIP(obj.instance, fullPlugin, obj.eta, obj.xi);
             trueSol = trueMIP.solve();
 
             [jStar, trueBreakdown] = uam.solver.Evaluator.evaluate( ...
@@ -63,7 +69,7 @@ classdef RegretFramework < handle
                 fprintf('\n--- %s 层级 ---\n', lv.label());
 
                 plugin = uam.abstraction.buildPlugin(lv, responses, obj.extWeights);
-                absMIP = uam.solver.TwoStageMIP(obj.instance, plugin);
+                absMIP = uam.solver.TwoStageMIP(obj.instance, plugin, obj.eta, obj.xi);
                 absSol = absMIP.solve();
 
                 % 在抽象模型下的目标值

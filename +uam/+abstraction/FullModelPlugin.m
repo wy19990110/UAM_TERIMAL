@@ -71,7 +71,7 @@ classdef FullModelPlugin < uam.abstraction.TerminalPlugin
         end
     end
 
-    methods (Access = protected)
+    methods
         function resp = getResponse(obj, terminalId, styleId)
             key = uam.core.makeKey(terminalId, styleId);
             resp = obj.responses(key);

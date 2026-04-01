@@ -39,6 +39,13 @@ classdef (Abstract) TerminalPlugin < handle
     end
 
     methods
+        function resp = getResponse(obj, terminalId, styleId)
+            % getResponse 获取完整的 TerminalResponse（供求解器批量查询）
+            %   子类应覆盖此方法
+            error('uam:abstraction:notImplemented', ...
+                'getResponse must be overridden by subclass');
+        end
+
         function [feasVec, blockVec] = getCorridorVectors(obj, terminalId, styleId, corridorIds)
             % getCorridorVectors 批量查询走廊可行性和阻塞状态
             %
