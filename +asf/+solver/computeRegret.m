@@ -11,33 +11,54 @@ function results = computeRegret(inst, levels, ifaces, opts)
         opts struct = struct('nPwl', 7, 'verbose', false)
     end
 
-    % 1. 求解 M* (truth benchmark)
+    % 1. 求解 M* + 各抽象层级，收集所有设计
     if opts.verbose, fprintf('求解 M*...\n'); end
     starDesign = asf.solver.solveMILP(inst, "Mstar", containers.Map(), opts);
-    [jStar, starBD] = asf.solver.truthEvaluate(starDesign, inst);
+    [jStarRaw, starBD] = asf.solver.truthEvaluate(starDesign, inst);
 
-    results.star.design = starDesign;
-    results.star.jTruth = jStar;
-    results.star.breakdown = starBD;
-
-    if opts.verbose
-        fprintf('M*: J*=%.4f, edges=%s\n', jStar, strjoin(starDesign.activeEdges, ','));
-    end
+    % 收集所有设计及其 truth 值，取全局最优作为 J*
+    allDesigns = {starDesign};
+    allJTruth = jStarRaw;
+    allBD = {starBD};
+    allLabels = {"Mstar"};
 
     % 2. 各抽象层级
-    m0Regret = NaN;
     for li = 1:numel(levels)
         lv = levels(li);
         if opts.verbose, fprintf('求解 %s...\n', lv); end
-
-        % 选择对应的接口
         lvIfaces = containers.Map();
         if ifaces.isKey(char(lv))
             lvIfaces = ifaces(char(lv));
         end
-
         design = asf.solver.solveMILP(inst, lv, lvIfaces, opts);
         [jTruth, bd] = asf.solver.truthEvaluate(design, inst);
+        allDesigns{end+1} = design; %#ok<AGROW>
+        allJTruth(end+1) = jTruth; %#ok<AGROW>
+        allBD{end+1} = bd; %#ok<AGROW>
+        allLabels{end+1} = char(lv); %#ok<AGROW>
+    end
+
+    % 取 truth 口径下的全局最优作为 J*（跨所有模型选最好的设计）
+    [jStar, bestIdx] = min(allJTruth);
+    starDesign = allDesigns{bestIdx};
+    starBD = allBD{bestIdx};
+
+    results.star.design = starDesign;
+    results.star.jTruth = jStar;
+    results.star.breakdown = starBD;
+    results.star.source = allLabels{bestIdx};
+
+    if opts.verbose
+        fprintf('J* = %.4f (来自 %s), edges=%s\n', jStar, allLabels{bestIdx}, strjoin(starDesign.activeEdges, ','));
+    end
+
+    % 3. 计算 regret（相对全局最优 J*）
+    m0Regret = NaN;
+    for li = 1:numel(levels)
+        lv = levels(li);
+        design = allDesigns{1 + li};  % +1 因为 allDesigns{1} 是 Mstar
+        jTruth = allJTruth(1 + li);
+        bd = allBD{1 + li};
 
         delta = jTruth - jStar;
         relDelta = delta / max(abs(jStar), 1e-10);
