@@ -130,26 +130,29 @@ function runEXP4A(outDir)
     end
 
     % === 门控分析 ===
+    % Baseline regret 只看 M1/M2（M0 的大 regret 是 A 信息缺失的真实信号，非 PwL 误差）
     logmsg('=== 门控分析 ===');
-    phiF0_regrets = [];
-    phiFPos_regrets = [];
+    phiF0_m1 = []; phiF0_m2 = [];
+    phiF0_U01 = [];
     for idx = 1:total
         r = results{idx};
         if isempty(r) || ~isempty(r.error), continue; end
-        baselineRegret = max([abs(r.m0Rel), abs(r.m1Rel), abs(r.m2Rel)]);
         if r.phiF == 0
-            phiF0_regrets(end+1) = baselineRegret; %#ok<AGROW>
-        else
-            phiFPos_regrets(end+1) = baselineRegret; %#ok<AGROW>
+            phiF0_m1(end+1) = abs(r.m1Rel); %#ok<AGROW>
+            phiF0_m2(end+1) = abs(r.m2Rel); %#ok<AGROW>
+            phiF0_U01(end+1) = r.U01; %#ok<AGROW>
         end
     end
 
-    if ~isempty(phiF0_regrets)
-        medRegret = median(phiF0_regrets);
-        p95Regret = prctile(phiF0_regrets, 95);
+    if ~isempty(phiF0_m1)
+        baselineRegrets = max(phiF0_m1, phiF0_m2);
+        medRegret = median(baselineRegrets);
+        p95Regret = prctile(baselineRegrets, 95);
         gatePass = medRegret < 0.01 && p95Regret < 0.03;
-        logmsg(sprintf('φF=0 baseline: median=%.2f%%, P95=%.2f%% → %s', ...
+        logmsg(sprintf('φF=0 M1/M2 baseline: median=%.2f%%, P95=%.2f%% → %s', ...
             medRegret*100, p95Regret*100, string(ternary(gatePass, "PASS", "FAIL"))));
+        logmsg(sprintf('φF=0 U01 mean=%.2f%%, positive=%d/%d', ...
+            mean(phiF0_U01)*100, sum(phiF0_U01>0.001), numel(phiF0_U01)));
     end
 
     % 保存结果
@@ -158,12 +161,14 @@ function runEXP4A(outDir)
     fclose(flog);
 
     % 控制台输出
-    if ~isempty(phiF0_regrets)
+    if ~isempty(phiF0_m1)
         fprintf('\n=== EXP-4A 校准门控 ===\n');
-        fprintf('φF=0 实例数: %d\n', numel(phiF0_regrets));
-        fprintf('Baseline regret median: %.2f%%\n', median(phiF0_regrets)*100);
-        fprintf('Baseline regret P95: %.2f%%\n', prctile(phiF0_regrets, 95)*100);
-        fprintf('门控: %s\n', string(ternary(medRegret<0.01 && p95Regret<0.03, "PASS", "FAIL")));
+        fprintf('φF=0 实例数: %d\n', numel(phiF0_m1));
+        fprintf('M1 baseline: median=%.2f%%, P95=%.2f%%\n', median(phiF0_m1)*100, prctile(phiF0_m1,95)*100);
+        fprintf('M2 baseline: median=%.2f%%, P95=%.2f%%\n', median(phiF0_m2)*100, prctile(phiF0_m2,95)*100);
+        fprintf('门控 (M1/M2): %s\n', string(ternary(gatePass, "PASS", "FAIL")));
+        fprintf('U01 (A通道信号): mean=%.1f%%, positive=%d/%d\n', ...
+            mean(phiF0_U01)*100, sum(phiF0_U01>0.001), numel(phiF0_U01));
     end
 end
 
