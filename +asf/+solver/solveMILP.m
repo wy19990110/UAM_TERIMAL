@@ -1,13 +1,14 @@
 function design = solveMILP(inst, level, ifaces, opts)
-    % solveMILP 构建并求解 MILP
+    % solveMILP 构建并求解多商品流 MILP
     %
-    %   服务成本二次项用 PwL 近似：对每个 port 的 b*λ² 用分段线性上逼近。
-    %   引入辅助变量 ψ_{t,h} 表示 port 级服务成本的 PwL 值。
+    %   多商品流：每 OD 对独立流守恒
+    %   服务成本二次项用 PwL 切线下界近似
+    %   M2 footprint load-sensitivity 用 McCormick relaxation
     arguments
         inst asf.core.ProblemInstance
         level (1,1) string = "Mstar"
         ifaces = containers.Map()
-        opts struct = struct('nPwl', 7, 'verbose', false)
+        opts struct = struct('nPwl', 15, 'verbose', false)
     end
 
     edgeIds = string(inst.edges.keys);
@@ -16,6 +17,10 @@ function design = solveMILP(inst, level, ifaces, opts)
     nC = numel(connIds);
     comms = inst.getCommodities();
     nK = size(comms, 1);
+    if nK == 0
+        design = asf.core.NetworkDesign();
+        return;
+    end
 
     % 收集 backbone 节点
     nodeMap = containers.Map();
@@ -28,7 +33,7 @@ function design = solveMILP(inst, level, ifaces, opts)
 
     % Port 列表
     tkeys = inst.terminals.keys;
-    portList = {};  % {tid, pid, a, b}
+    portList = {};
     for ti = 1:numel(tkeys)
         t = inst.terminals(tkeys{ti});
         for pi = 1:numel(t.ports)
@@ -39,7 +44,7 @@ function design = solveMILP(inst, level, ifaces, opts)
     end
     nP = numel(portList);
 
-    % Connector → port 映射: connPortIdx(i) = 该 connector 对应的 portList 索引
+    % Connector → port 映射
     connPortIdx = zeros(nC, 1);
     for ci = 1:nC
         c = inst.connectors(char(connIds(ci)));
@@ -50,15 +55,25 @@ function design = solveMILP(inst, level, ifaces, opts)
         end
     end
 
+    % Connector → edge 映射
+    connEdgeIdx = zeros(nC, 1);
+    for ci = 1:nC
+        c = inst.connectors(char(connIds(ci)));
+        for ei = 1:nE
+            if edgeIds(ei) == c.edgeId
+                connEdgeIdx(ci) = ei; break;
+            end
+        end
+    end
+
     % === 获取每个 port 的服务成本参数（按 level） ===
-    portA = zeros(nP, 1);  % 线性系数
-    portB = zeros(nP, 1);  % 二次系数
+    portA = zeros(nP, 1);
+    portB = zeros(nP, 1);
     for pi = 1:nP
         tid = portList{pi}.tid;
         pid = portList{pi}.pid;
         if level == "M0" && ifaces.isKey(tid)
             m0 = ifaces(tid);
-            % M0: 聚合 → 所有 port 共享 aggregate 系数（按 port 数均分）
             t = inst.terminals(tid);
             nPorts = numel(t.ports);
             portA(pi) = m0.aBar / nPorts;
@@ -70,23 +85,56 @@ function design = solveMILP(inst, level, ifaces, opts)
                 portB(pi) = m1.portService.(pid).b;
             end
         else
-            % Mstar: truth coefficients
             portA(pi) = portList{pi}.a;
             portB(pi) = portList{pi}.b;
         end
     end
 
-    % === 变量布局 ===
-    % x(nE) | y(nC) | f_fwd(nE) | f_rev(nE) | f_conn(nC) | lam(nP) | psi(nP) | unmet(1)
+    % === 变量布局（多商品流）===
+    % x(nE) | y(nC) | f_fwd(nE*nK) | f_rev(nE*nK) | f_conn(nC*nK) | lam(nP) | psi(nP) | unmet(nK)
     oX = 0;
     oY = nE;
     oFwd = nE + nC;
-    oRev = oFwd + nE;
-    oFc = oRev + nE;
-    oLam = oFc + nC;
+    oRev = oFwd + nE*nK;
+    oFc = oRev + nE*nK;
+    oLam = oFc + nC*nK;
     oPsi = oLam + nP;
     oUn = oPsi + nP;
-    nVars = oUn + 1;
+    nVars = oUn + nK;
+
+    % McCormick 辅助变量 w（仅 M2 + loadSensitivity）
+    mcList = [];  % struct array: edgeIdx, portIdx, rho, lamMax
+    oMc = nVars;
+    if level == "M2"
+        for ti = 1:numel(tkeys)
+            if ~ifaces.isKey(tkeys{ti}), continue; end
+            m2 = ifaces(tkeys{ti});
+            if ~isfield(m2, 'loadSensitivity'), continue; end
+            lsFnames = fieldnames(m2.loadSensitivity);
+            for fi = 1:numel(lsFnames)
+                sfn = lsFnames{fi};
+                rhoVal = m2.loadSensitivity.(sfn);
+                % 解析 edgeId_portId
+                parts = split(string(sfn), '_');
+                if numel(parts) < 2, continue; end
+                eidStr = strjoin(parts(1:end-1), '_');
+                pidStr = parts(end);
+                eIdx = find(edgeIds == eidStr);
+                if isempty(eIdx), continue; end
+                pIdx = 0;
+                for pi2 = 1:nP
+                    if strcmp(portList{pi2}.tid, tkeys{ti}) && strcmp(portList{pi2}.pid, char(pidStr))
+                        pIdx = pi2; break;
+                    end
+                end
+                if pIdx == 0, continue; end
+                t2 = inst.terminals(tkeys{ti});
+                mcList = [mcList; struct('eIdx', eIdx, 'pIdx', pIdx, 'rho', rhoVal, 'lamMax', t2.muBar)]; %#ok<AGROW>
+            end
+        end
+    end
+    nMc = numel(mcList);
+    nVars = nVars + nMc;
 
     nBin = nE + nC;
 
@@ -109,16 +157,24 @@ function design = solveMILP(inst, level, ifaces, opts)
     % === 目标函数 ===
     fObj = zeros(nVars, 1);
     fObj(oX+1:oX+nE) = edgeCC;
-    fObj(oFwd+1:oFwd+nE) = edgeCosts;
-    fObj(oRev+1:oRev+nE) = edgeCosts;
-    fObj(oFc+1:oFc+nC) = connCosts;
-    % 线性服务成本 a*λ 通过 port load 变量
+    % Travel cost per commodity
+    for ki = 1:nK
+        fObj(oFwd + (ki-1)*nE + (1:nE)) = edgeCosts;
+        fObj(oRev + (ki-1)*nE + (1:nE)) = edgeCosts;
+        fObj(oFc + (ki-1)*nC + (1:nC)) = connCosts;
+    end
+    % 线性服务成本 a*λ
     fObj(oLam+1:oLam+nP) = portA;
     % PwL 近似的二次成本通过 ψ 变量
-    fObj(oPsi+1:oPsi+nP) = 1;  % ψ 直接进目标
-    fObj(oUn+1) = inst.unmetPenalty;
+    fObj(oPsi+1:oPsi+nP) = 1;
+    % Unmet penalty per commodity
+    fObj(oUn+1:oUn+nK) = inst.unmetPenalty;
+    % McCormick: Σ ρ̃ * w
+    for mi = 1:nMc
+        fObj(oMc + mi) = mcList(mi).rho;
+    end
 
-    % M2 footprint penalty on x
+    % M2 footprint nominal penalty on x
     if level == "M2"
         for ti = 1:numel(tkeys)
             if ~ifaces.isKey(tkeys{ti}), continue; end
@@ -157,131 +213,202 @@ function design = solveMILP(inst, level, ifaces, opts)
                     fObj(oX + eIdx) = fObj(oX + eIdx) + 1e4;
                 end
             end
+            % Mstar: load-sensitivity 也作为 McCormick（精确版直接加 ρ*λ*x）
+            % 这里简化：Mstar 用 nominal penalty + loadSens 直接加到 edge cost
+            lsFnames = fieldnames(t.fpLoadSens);
+            for fi = 1:numel(lsFnames)
+                % 在 truth evaluator 中精确处理，MILP 中仅用 nominal
+            end
         end
     end
 
     % === 不等式约束 ===
-    Aineq = []; bineq = [];
+    % 预分配稀疏构建
+    Arows = []; Acols = []; Avals = [];
+    bineq = [];
+    rowIdx = 0;
 
-    % C1: f_fwd + f_rev <= cap * x
+    % C1: Σ_k f_fwd(e,k) + Σ_k f_rev(e,k) <= cap(e) * x(e)
     for i = 1:nE
-        row = zeros(1, nVars);
-        row(oFwd + i) = 1; row(oRev + i) = 1; row(oX + i) = -edgeCaps(i);
-        Aineq(end+1,:) = row; bineq(end+1,1) = 0; %#ok<AGROW>
+        rowIdx = rowIdx + 1;
+        for ki = 1:nK
+            Arows(end+1) = rowIdx; Acols(end+1) = oFwd + (ki-1)*nE + i; Avals(end+1) = 1; %#ok<AGROW>
+            Arows(end+1) = rowIdx; Acols(end+1) = oRev + (ki-1)*nE + i; Avals(end+1) = 1; %#ok<AGROW>
+        end
+        Arows(end+1) = rowIdx; Acols(end+1) = oX + i; Avals(end+1) = -edgeCaps(i); %#ok<AGROW>
+        bineq(end+1,1) = 0; %#ok<AGROW>
     end
 
-    % C2: f_conn <= bigM * y
-    for i = 1:nC
-        row = zeros(1, nVars);
-        row(oFc + i) = 1; row(oY + i) = -1000;
-        Aineq(end+1,:) = row; bineq(end+1,1) = 0; %#ok<AGROW>
-    end
-
-    % C3: y <= x
-    for i = 1:nC
-        c = inst.connectors(char(connIds(i)));
-        eIdx = find(edgeIds == c.edgeId);
-        if ~isempty(eIdx)
-            row = zeros(1, nVars);
-            row(oY + i) = 1; row(oX + eIdx) = -1;
-            Aineq(end+1,:) = row; bineq(end+1,1) = 0; %#ok<AGROW>
+    % C2: f_conn(c,k) <= bigM * y(c)  for all c, k
+    bigM = 1000;
+    for ci = 1:nC
+        for ki = 1:nK
+            rowIdx = rowIdx + 1;
+            Arows(end+1) = rowIdx; Acols(end+1) = oFc + (ki-1)*nC + ci; Avals(end+1) = 1; %#ok<AGROW>
+            Arows(end+1) = rowIdx; Acols(end+1) = oY + ci; Avals(end+1) = -bigM; %#ok<AGROW>
+            bineq(end+1,1) = 0; %#ok<AGROW>
         end
     end
 
-    % C7: PwL 近似 b*λ² → ψ >= 斜率_j * λ - 截距_j
-    % 对凸函数 b*λ², 切线下界: ψ >= 2b*λ_j * λ - b*λ_j²
+    % C3: y(c) <= x(e) for connector c on edge e
+    for ci = 1:nC
+        eIdx = connEdgeIdx(ci);
+        if eIdx > 0
+            rowIdx = rowIdx + 1;
+            Arows(end+1) = rowIdx; Acols(end+1) = oY + ci; Avals(end+1) = 1; %#ok<AGROW>
+            Arows(end+1) = rowIdx; Acols(end+1) = oX + eIdx; Avals(end+1) = -1; %#ok<AGROW>
+            bineq(end+1,1) = 0; %#ok<AGROW>
+        end
+    end
+
+    % C7: PwL 切线下界 ψ >= 2b*bp_j * λ - b*bp_j²
     nPwl = opts.nPwl;
     for pi = 1:nP
         b = portB(pi);
         if abs(b) < 1e-10, continue; end
-        % 断点: 均匀分布在 [0, capMax]
         tid = portList{pi}.tid;
         t = inst.terminals(tid);
         capMax = t.muBar;
         bps = linspace(0, capMax, nPwl);
         for j = 1:nPwl
-            % 切线: ψ >= 2b*bp_j * λ - b*bp_j²
-            % → -ψ + 2b*bp_j * λ <= b*bp_j²
-            % → ψ - 2b*bp_j * λ >= -b*bp_j²
-            % Aineq: -(ψ - slope*λ) <= intercept → -ψ + slope*λ <= intercept
-            row = zeros(1, nVars);
-            row(oPsi + pi) = -1;
-            row(oLam + pi) = 2 * b * bps(j);
-            Aineq(end+1,:) = row; %#ok<AGROW>
+            rowIdx = rowIdx + 1;
+            Arows(end+1) = rowIdx; Acols(end+1) = oPsi + pi; Avals(end+1) = -1; %#ok<AGROW>
+            Arows(end+1) = rowIdx; Acols(end+1) = oLam + pi; Avals(end+1) = 2*b*bps(j); %#ok<AGROW>
             bineq(end+1,1) = b * bps(j)^2; %#ok<AGROW>
         end
     end
 
+    % McCormick constraints for w_{e,h} = λ_h * x_e
+    for mi = 1:nMc
+        eIdx = mcList(mi).eIdx;
+        pIdx = mcList(mi).pIdx;
+        lamMax = mcList(mi).lamMax;
+        wIdx = oMc + mi;
+        % w <= lamMax * x
+        rowIdx = rowIdx + 1;
+        Arows(end+1) = rowIdx; Acols(end+1) = wIdx; Avals(end+1) = 1; %#ok<AGROW>
+        Arows(end+1) = rowIdx; Acols(end+1) = oX + eIdx; Avals(end+1) = -lamMax; %#ok<AGROW>
+        bineq(end+1,1) = 0; %#ok<AGROW>
+        % w <= λ
+        rowIdx = rowIdx + 1;
+        Arows(end+1) = rowIdx; Acols(end+1) = wIdx; Avals(end+1) = 1; %#ok<AGROW>
+        Arows(end+1) = rowIdx; Acols(end+1) = oLam + pIdx; Avals(end+1) = -1; %#ok<AGROW>
+        bineq(end+1,1) = 0; %#ok<AGROW>
+        % -w <= -λ + lamMax*(1-x)  →  -w + λ - lamMax*x <= lamMax - 0  →  w >= λ - lamMax*(1-x)
+        rowIdx = rowIdx + 1;
+        Arows(end+1) = rowIdx; Acols(end+1) = wIdx; Avals(end+1) = -1; %#ok<AGROW>
+        Arows(end+1) = rowIdx; Acols(end+1) = oLam + pIdx; Avals(end+1) = 1; %#ok<AGROW>
+        Arows(end+1) = rowIdx; Acols(end+1) = oX + eIdx; Avals(end+1) = -lamMax; %#ok<AGROW>
+        bineq(end+1,1) = 0; %#ok<AGROW>
+        % w >= 0 is handled by lb
+    end
+
+    Aineq = sparse(Arows, Acols, Avals, rowIdx, nVars);
+
     % === 等式约束 ===
-    Aeq = []; beq = [];
+    EqRows = []; EqCols = []; EqVals = [];
+    beq = [];
+    eqIdx = 0;
 
     % C4: Admissibility (M0 skips)
     if level ~= "M0"
-        for i = 1:nC
-            c = inst.connectors(char(connIds(i)));
+        for ci = 1:nC
+            c = inst.connectors(char(connIds(ci)));
             key = char(c.terminalId + "_" + c.portId + "_" + c.edgeId);
             admissible = false;
             if inst.admissibility.isKey(key)
                 admissible = inst.admissibility(key);
             end
             if ~admissible
-                row = zeros(1, nVars);
-                row(oY + i) = 1;
-                Aeq(end+1,:) = row; beq(end+1,1) = 0; %#ok<AGROW>
+                eqIdx = eqIdx + 1;
+                EqRows(end+1) = eqIdx; EqCols(end+1) = oY + ci; EqVals(end+1) = 1; %#ok<AGROW>
+                beq(end+1,1) = 0; %#ok<AGROW>
             end
         end
     end
 
-    % C5: Flow conservation at backbone nodes
+    % C5: Per-commodity flow conservation at each backbone node
     allNodes = nodeMap.keys;
-    for ni = 1:numel(allNodes)
-        node = allNodes{ni};
-        row = zeros(1, nVars);
-        for i = 1:nE
-            e = inst.edges(char(edgeIds(i)));
-            if char(e.nodeV) == string(node), row(oFwd+i) = 1; end   % fwd inflow
-            if char(e.nodeU) == string(node), row(oFwd+i) = row(oFwd+i) - 1; end  % fwd outflow
-            if char(e.nodeU) == string(node), row(oRev+i) = 1; end   % rev inflow
-            if char(e.nodeV) == string(node), row(oRev+i) = row(oRev+i) - 1; end  % rev outflow
-        end
-        % Connector outflow from terminal backbone node
-        for i = 1:nC
-            c = inst.connectors(char(connIds(i)));
-            if char(c.terminalId) == string(node)
-                row(oFc + i) = -1;
-            end
-        end
-        % Supply
-        supply = 0;
-        for ki = 1:nK
-            if char(comms(ki,1)) == string(node)
-                supply = supply - inst.getDemand(comms(ki,1), comms(ki,2));
-            end
-        end
-        Aeq(end+1,:) = row; beq(end+1,1) = supply; %#ok<AGROW>
-    end
-
-    % C6: Port load = Σ connector flows to that port
-    for pi = 1:nP
-        row = zeros(1, nVars);
-        row(oLam + pi) = -1;
-        for ci = 1:nC
-            if connPortIdx(ci) == pi
-                row(oFc + ci) = 1;
-            end
-        end
-        Aeq(end+1,:) = row; beq(end+1,1) = 0; %#ok<AGROW>
-    end
-
-    % Demand balance: Σ port_loads + unmet = totalDemand
-    totalDemand = 0;
     for ki = 1:nK
-        totalDemand = totalDemand + inst.getDemand(comms(ki,1), comms(ki,2));
+        src_k = char(comms(ki,1));
+        demand_k = inst.getDemand(comms(ki,1), comms(ki,2));
+
+        for ni = 1:numel(allNodes)
+            node = allNodes{ni};
+            eqIdx = eqIdx + 1;
+
+            % Backbone edge flows
+            for ei = 1:nE
+                e = inst.edges(char(edgeIds(ei)));
+                fwdVar = oFwd + (ki-1)*nE + ei;
+                revVar = oRev + (ki-1)*nE + ei;
+                % fwd: nodeU → nodeV
+                if char(e.nodeV) == string(node)  % fwd inflow
+                    EqRows(end+1) = eqIdx; EqCols(end+1) = fwdVar; EqVals(end+1) = 1; %#ok<AGROW>
+                end
+                if char(e.nodeU) == string(node)  % fwd outflow
+                    EqRows(end+1) = eqIdx; EqCols(end+1) = fwdVar; EqVals(end+1) = -1; %#ok<AGROW>
+                end
+                % rev: nodeV → nodeU
+                if char(e.nodeU) == string(node)  % rev inflow
+                    EqRows(end+1) = eqIdx; EqCols(end+1) = revVar; EqVals(end+1) = 1; %#ok<AGROW>
+                end
+                if char(e.nodeV) == string(node)  % rev outflow
+                    EqRows(end+1) = eqIdx; EqCols(end+1) = revVar; EqVals(end+1) = -1; %#ok<AGROW>
+                end
+            end
+
+            % Connector outflow from terminal backbone node
+            for ci = 1:nC
+                c = inst.connectors(char(connIds(ci)));
+                if char(c.terminalId) == string(node)
+                    fcVar = oFc + (ki-1)*nC + ci;
+                    EqRows(end+1) = eqIdx; EqCols(end+1) = fcVar; EqVals(end+1) = -1; %#ok<AGROW>
+                end
+            end
+
+            % Supply: only source node injects flow
+            supply = 0;
+            if string(node) == string(src_k)
+                supply = -demand_k;
+            end
+            beq(end+1,1) = supply; %#ok<AGROW>
+        end
     end
-    row = zeros(1, nVars);
-    row(oLam+1:oLam+nP) = 1;
-    row(oUn+1) = 1;
-    Aeq(end+1,:) = row; beq(end+1,1) = totalDemand;
+
+    % C6: Port load = Σ_k Σ_{c→p} f_conn(c,k)
+    for pi = 1:nP
+        eqIdx = eqIdx + 1;
+        EqRows(end+1) = eqIdx; EqCols(end+1) = oLam + pi; EqVals(end+1) = -1; %#ok<AGROW>
+        for ki = 1:nK
+            for ci = 1:nC
+                if connPortIdx(ci) == pi
+                    fcVar = oFc + (ki-1)*nC + ci;
+                    EqRows(end+1) = eqIdx; EqCols(end+1) = fcVar; EqVals(end+1) = 1; %#ok<AGROW>
+                end
+            end
+        end
+        beq(end+1,1) = 0; %#ok<AGROW>
+    end
+
+    % C8: Per-commodity demand balance at destination
+    % Σ_{c reaching dst_k's ports} f_conn(c,k) + unmet(k) = demand_k
+    for ki = 1:nK
+        dst_k = char(comms(ki,2));
+        demand_k = inst.getDemand(comms(ki,1), comms(ki,2));
+        eqIdx = eqIdx + 1;
+        for ci = 1:nC
+            c = inst.connectors(char(connIds(ci)));
+            if char(c.terminalId) == dst_k
+                fcVar = oFc + (ki-1)*nC + ci;
+                EqRows(end+1) = eqIdx; EqCols(end+1) = fcVar; EqVals(end+1) = 1; %#ok<AGROW>
+            end
+        end
+        EqRows(end+1) = eqIdx; EqCols(end+1) = oUn + ki; EqVals(end+1) = 1; %#ok<AGROW>
+        beq(end+1,1) = demand_k; %#ok<AGROW>
+    end
+
+    Aeq = sparse(EqRows, EqCols, EqVals, eqIdx, nVars);
 
     % === 变量边界 ===
     lb = zeros(nVars, 1);
@@ -308,5 +435,6 @@ function design = solveMILP(inst, level, ifaces, opts)
         key = strcat(portList{pi}.tid, '_', portList{pi}.pid);
         design.portLoads(key) = sol(oLam + pi);
     end
-    design.unmetDemand('total') = sol(oUn+1);
+    totalUnmet = sum(sol(oUn+1:oUn+nK));
+    design.unmetDemand('total') = totalUnmet;
 end

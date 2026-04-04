@@ -11,6 +11,7 @@ classdef ProblemInstance
         admissibility   % containers.Map: "tid_pid_eid" -> bool
         odDemand        % containers.Map: "src-dst" -> demand
         unmetPenalty    (1,1) double = 100
+        excitation      struct = struct('E_A',0,'E_S',0,'E_F',0)  % 激发指标
     end
 
     methods

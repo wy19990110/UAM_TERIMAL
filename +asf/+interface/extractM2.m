@@ -8,4 +8,5 @@ function iface = extractM2(terminal, inst)
     % Nominal footprint
     iface.nominalPenalty = terminal.fpBasePenalty;  % struct: edgeId -> π
     iface.blockedEdges = terminal.blockedEdges;     % string array
+    iface.loadSensitivity = terminal.fpLoadSens;    % struct: edgeId_portId -> ρ̃
 end
