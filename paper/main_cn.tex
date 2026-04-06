@@ -1,0 +1,341 @@
+\documentclass[review,authoryear]{elsarticle}
+
+\usepackage[UTF8]{ctex}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{multirow}
+\usepackage{enumitem}
+
+\graphicspath{{figures/}}
+
+\journal{Transportation Research Part C: Emerging Technologies}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{当终端不是点节点：面向低空可复用航路网络设计的分层接口}
+
+\author[inst1]{匿名作者\corref{cor1}}
+\cortext[cor1]{通讯作者}
+\ead{anonymous@university.edu}
+
+\affiliation[inst1]{organization={院系},
+  city={城市},
+  country={国家}}
+
+\begin{abstract}
+现有低空可复用航路网络设计常将终端视为同质节点，但真实终端在接入规则、端口级服务与邻域约束上高度异质。本文研究这种异质性何时会误导战略网络设计，并提出一个面向网络层的分层终端接口：可接性（A）、端口级服务能力（S）和邻域脚印/冲突（F）。我们采用共享候选图、各模型独立设计、再在统一真值模型下重算的评估协议，比较 S-only、AS 和 ASF 三类规划器。结果表明，忽略~A、S、F 均可能独立导致不可行或高后悔值设计；AS 可显著提高设计充分性，而 ASF 在高脚印约束区间成为必要。因此，异质终端可以被压缩为一套经检验的分层接口，并据此形成战略网络设计中的模型升级规则。
+\end{abstract}
+
+\begin{keyword}
+低空交通 \sep 城市空中交通 \sep 航路网络设计 \sep 终端抽象 \sep 接口充分性 \sep 设计误导
+\end{keyword}
+
+\end{frontmatter}
+
+%% ============================================================
+\section{引言}
+\label{sec:introduction}
+%% ============================================================
+
+城市空中交通与低空运输正在从点状示范走向网络化建设。此时更关键的问题已经不再是单个终端如何运行，而是哪些可复用航路应被建设、终端如何接入这些航路，以及需求应如何在网络中分配。现有相关研究已经开始讨论低空走廊构建、终端选址与网络连通性，但在战略层模型中，终端往往仍被压缩为带有聚合需求和总容量的普通节点。
+
+这种简化并不总是无害。终端在至少三个维度上存在显著异质性。第一，connector 能否接入终端、能接入哪个 port，受方向、程序与局部规则影响。第二，即使接入可行，不同 port 对终端内部资源的占用也可能不同，从而改变边际服务代价。第三，终端邻域可能存在保护区、程序排斥区或局部冲突区，这些局部约束会直接改变终端附近候选边的可用性与相对成本。于是，终端并不只是需求的起讫点，它还是外部网络与局部运行结构之间的接口。
+
+本文要解决的正是这一接口问题。我们的目标不是把所有终端细节永久抬升到一个庞大的联合优化器中，而是识别：为了把战略层网络设计做对，终端最少需要向上层暴露什么信息。本文提出一个分层终端接口，由三条面向网络的通道组成：可接性~A、端口级服务能力~S、以及邻域脚印/冲突~F。
+
+本文的贡献有四点：
+\begin{enumerate}[label=(\roman*)]
+  \item 提出一类终端耦合的低空可复用航路网络设计问题，并说明在这类问题中，将终端压缩为普通节点会改变设计排序。
+  \item 提出一个分层的 A/S/F 终端接口家族，并给出比设计抽象更丰富、但仍可用于统一重算的采用型终端真值类。
+  \item 构建"按各自抽象设计——在统一真值下重算"的评估协议，直接评估设计误导，而不是模型拟合误差。
+  \item 给出从筛查、最小反例、通道隔离、混合推荐图到现实代理案例的一条完整证据链。
+\end{enumerate}
+
+本文的边界也需要明确。本文不声称 A/S/F 是适用于所有终端机理的全局最小充分接口，也不解决终端布局设计、终端调度或高保真运行仿真。本文交付的是：在一个采用型终端真值类下，经检验的分层终端接口，以及相应的模型升级规则。
+
+\begin{figure}[htbp]
+  \centering
+  % \includegraphics[width=\textwidth]{fig_concept_comparison.pdf}
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{3em}图片占位："终端是点"与"终端是分层接口"的概念对比图。\vspace{3em}}}
+  \caption{"终端是点"与"终端是分层接口"的概念对比图。}
+  \label{fig:concept}
+\end{figure}
+
+
+%% ============================================================
+\section{问题定义与分层终端接口}
+\label{sec:problem}
+%% ============================================================
+
+\subsection{终端耦合的低空可复用航路网络设计问题}
+\label{sec:problem:coupled}
+
+考虑一个由终端节点、waypoint 节点、主干候选边与 connector 候选边组成的候选图。上层规划器需要在该图上同时决定：哪些主干走廊被建设、哪些 terminal-to-network connectors 被启用，以及 OD 需求如何在选定网络上分配。传统战略网络设计通常把终端压缩为节点，并最多保留一个聚合容量或聚合服务项；而在本文研究的问题中，这种压缩会改变设计优劣排序。换言之，两个在节点抽象下看似等价的网络设计，在恢复终端异质性后可能表现明显不同。
+
+因此，本文的决策对象仍然是战略层网络设计，而不是终端内部运行设计。变化的是终端向上层暴露的信息，而不是问题层级本身。
+
+\subsection{采用的终端真值类}
+\label{sec:problem:truth}
+
+为统一评估不同抽象下得到的网络设计，本文引入一个采用型的中观终端真值类。它不是对现实终端运行机理的唯一正确表述，而是一个比 M0/M1/M2 更丰富、对设计误导足够敏感、同时又便于统一重算的基准模型。
+
+该真值类围绕三条面向网络的通道组织。
+
+\paragraph{A：可接性（access admissibility）。}
+A 描述 connector 是否可以合法或几何上接入某个终端 port。它由 port 朝向、扇区宽度、接口规则以及上下文中的禁止方向或禁止 connector 共同决定。在网络层，A 直接决定 connector--port 对是否可行。
+
+\paragraph{S：端口级服务能力（service capability）。}
+S 描述终端内部资源竞争如何进入战略设计。直观上，不同 port 共享 pad、merge point、waiting segment、release slot 或 terminal-wide control capacity 等资源；共享资源带来跨端口拖慢，终端级约束则带来饱和效应。本文不把全部资源模型抬升到上层，而是将其在设计相关工作区间压缩为端口级凸服务成本与跨端口耦合项。
+
+\paragraph{F：邻域脚印/冲突（footprint/conflict）。}
+F 描述终端邻域如何影响附近候选边的可用性与成本。它对应于保护区、程序排斥、局部控制包络或局部冲突暴露等对象。在主文中，F 被有意写得保守：重点是硬阻断与名义局部惩罚，而不是完整的负载敏感型邻域冲突理论。
+
+\subsection{接口层级}
+\label{sec:problem:hierarchy}
+
+本文比较四个层次的模型：
+\begin{itemize}
+  \item \textbf{M0（S-only）}：终端被压缩为粗节点，只暴露聚合服务信息。
+  \item \textbf{M1（AS）}：显式展开 ports 与 admissible connectors，并保留端口级服务信息。
+  \item \textbf{M2（ASF）}：在 M1 基础上加入终端邻域脚印信息。
+  \item \textbf{M$^*$}：用于统一评估的更丰富终端真值基准。
+\end{itemize}
+
+这一层级反映的是工程上的渐进加信息，而不是"复杂模型一定优于简单模型"的先验假设。M0 代价最低但信息最粗；M1 额外暴露进入终端的几何与规则结构；M2 再进一步暴露终端邻域对外部网络的局部外部性。
+
+
+%% ============================================================
+\section{模型与评估协议}
+\label{sec:models}
+%% ============================================================
+
+\subsection{设计模型}
+\label{sec:models:design}
+
+所有规划器在同一个候选图上工作。不同模型之间的差别，不来自候选空间，而只来自终端抽象层级。
+
+M0 通过聚合服务项评价 connectors 与路由选择。它看不到具体 port，也无法识别在更丰富真值结构下不可行的 connector。M1 引入 port-aware admissibility 与端口级服务，因此能够区分不同 connector 的终端接入可行性以及不同 port 的终端侧成本，但它忽略终端邻域对附近外部边的影响。M2 在 M1 之上加入邻域脚印信息，对部分近端边施加阻断或惩罚。M$^*$ 保留更丰富的端口耦合、邻域限制与情景依赖结构，用于统一评估设计结果。
+
+\subsection{统一真值重算协议}
+\label{sec:models:evaluation}
+
+本文比较的不是"哪个模型自己的目标值更小"，而是"哪个模型设计出来的网络在同一真值下更对"。统一协议如下：
+\begin{enumerate}
+  \item 所有模型共享同一候选图；
+  \item 每个模型在自己的抽象层上独立完成网络设计；
+  \item 固定设计后，把该设计放回统一的真值模型 M$^*$ 中重算流分配；
+  \item 以真值口径比较目标值、相对后悔值、拓扑差异与充分性。
+\end{enumerate}
+
+这种协议直接测量的是\textbf{设计误导}（design misguidance），也就是某种抽象是否把战略网络设计带偏，而不是抽象对底层机理的拟合误差。
+
+\subsection{评价指标}
+\label{sec:models:metrics}
+
+本文重点使用四类指标：
+\begin{itemize}
+  \item \textbf{Truth-evaluated objective}：设计在统一真值模型下的重算目标值；
+  \item \textbf{Relative regret}：相对真值最佳设计的目标差；
+  \item \textbf{Topology distance}：设计拓扑与真值最佳拓扑之间的差异；
+  \item \textbf{Sufficiency probability}：在给定阈值下，某个抽象产生"足够好"设计的概率。
+\end{itemize}
+
+\subsection{外部比较层的占位}
+\label{sec:models:benchmark}
+
+除 M0/M1/M2/M$^*$ 外，正文最终还将纳入两类外部比较对象。其一是现有的终端粗抽象方法；其二是作为研究工具与上界基准的 integrated upper bound。它们的角色不是替代本文主线，而是从外部验证：分层终端接口是否优于现有抽象，以及在计算代价更低的情况下能否恢复 integrated design 的大部分设计价值。
+
+\begin{figure}[htbp]
+  \centering
+  % \includegraphics[width=\textwidth]{fig_evaluation_protocol.pdf}
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{3em}图片占位：共享候选图、各模型独立设计、统一真值重算的评估流程图。\vspace{3em}}}
+  \caption{共享候选图、各模型独立设计、统一真值重算的评估流程图。}
+  \label{fig:protocol}
+\end{figure}
+
+
+%% ============================================================
+\section{实验设计}
+\label{sec:experiments}
+%% ============================================================
+
+\subsection{EXP-0：接口筛查而非发现}
+\label{sec:exp:screening}
+
+EXP-0 的作用是筛查 adopted interface hypothesis，而不是"发现" A/S/F。实验在单 terminal 层面对若干粗粒度因素族施加扰动，并测量 A、S、F 三条通道的响应。其目的仅是确认三条通道都不是空接口，并为后续实验设定参数范围。正文中只保留一张 family $\times$ channel 响应图和一句定位说明；更细的生成规则与统计过程放入附录。
+
+\subsection{EXP-1/EXP-2/EXP-3：A、S、F 的最小反例}
+\label{sec:exp:counterexamples}
+
+这组三个实验构成机制层证据链。
+
+\begin{itemize}
+  \item \textbf{EXP-1（A 的必要性）}：构造最小网络反例，证明忽略 admissibility 会导致 connector 选择错误，甚至在真值下不可行。
+  \item \textbf{EXP-2（S 的必要性）}：在 admissibility 不变的情况下，仅由于端口级服务不对称，M0 也会在中高负荷下系统性出错。
+  \item \textbf{EXP-3（F 的必要性）}：在 A 与 S 固定时，仅由于终端邻域脚印，近端方案会被推成绕行方案，M1 失效而 M2 恢复。
+\end{itemize}
+
+这三个实验以 proposition-style numerical evidence 的方式呈现：每个实验只服务于一个清晰命题。
+
+\begin{figure}[htbp]
+  \centering
+  % \includegraphics[width=\textwidth]{fig_counterexamples_cn.pdf}
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{3em}图片占位：三类最小反例的概念示意图。\vspace{3em}}}
+  \caption{三类最小反例的概念示意图。}
+  \label{fig:counterexamples}
+\end{figure}
+
+\subsection{EXP-4A/4B/4C/4D：从校准到区间图}
+\label{sec:exp:regime}
+
+这组实验用于从局部机制推进到全网推荐规则。
+
+\begin{itemize}
+  \item \textbf{EXP-4A（calibration gate）}：先验证在无 footprint 条件下，M1/M2 的基线误差足够小，确保后续区间图不是近似误差画出来的。
+  \item \textbf{EXP-4B（A/S isolation）}：在关闭 F 通道时，观察从 M0 升级到 M1 的价值如何随 access restrictiveness 与 service asymmetry 变化。
+  \item \textbf{EXP-4C（F isolation）}：固定中等 A/S 后，仅扫描 footprint severity，识别 M1 升级到 M2 的关键区间。
+  \item \textbf{EXP-4D（mixed regime map）}：在完整候选网络上综合扫描参数，输出 M0/M1/M2 的 hierarchical recommendation map。
+\end{itemize}
+
+\subsection{EXP-5：现实代理案例}
+\label{sec:exp:proxy}
+
+EXP-5 采用一个更接近机场邻近场景的固定图，检验在更真实的 geometry 与上下文约束下，前述 regime pattern 是否仍然成立。其主要任务不是提供普适性证明，而是为编辑和审稿人展示：在看起来更真实的图上，网络拓扑确实会改变。
+
+\subsection{待补的外部 benchmark 实验}
+\label{sec:exp:benchmark}
+
+正文还预留两组待补实验：
+\begin{itemize}
+  \item \textbf{外部下比较}：将现有终端粗抽象方法与本文的 M1/M2/RH（hierarchy-aware planner）放在同一候选图与同一真值重算协议下比较。
+  \item \textbf{对上比较}：将分层接口家族与 integrated upper bound 比较，报告质量——时间前沿、gap closure 与运行时间。
+\end{itemize}
+
+
+%% ============================================================
+\section{结果与分析}
+\label{sec:results}
+%% ============================================================
+
+\subsection{EXP-0 只支持"接口不为空"}
+\label{sec:results:screening}
+
+EXP-0 的结果说明 A、S、F 三条通道均存在非平凡响应，因此 adopted interface hypothesis 不是空的。但它并不证明 factor-to-channel 映射已经被严格识别。因此，正文不将 EXP-0 写成 headline result，而只把它作为方法支撑与参数设计依据。
+
+\subsection{最小反例表明 A、S、F 都可能独立误导设计}
+\label{sec:results:counterexamples}
+
+A 的反例最为直接。在 hard-cut 设定下，M0 会选择一个在真值下根本不可行的 connector；在 soft 设定下，M0 的相对后悔值可达 331.6\%，而 M1 可恢复为~0。这说明一旦 connector 的可接性受终端几何与规则影响，A 信息不可省略。
+
+S 的反例展示了另一种机制。这里 admissibility 被固定，因此错误不能归因于几何接入。实验表明，在低负荷下 M0 与 M1 几乎一致，但当需求强度升高后，聚合服务抽象开始系统性低估"外部便宜、终端昂贵"的方案，M0 的平均后悔值最高升至 14.7\%，而 M1 在全部正 regret 实例中完全恢复。于是，S 不是 A 的附属修正，而是独立的设计信息维度。
+
+F 的反例则隔离出终端邻域效应。即使 A 和 S 保持不变，只要终端附近的某些边被脚印或局部冲突所阻断，M1 仍可能继续选择原本便宜的近端边，而 M2 会改选绕行方案并恢复正确设计。这说明 AS 并不总是足够，某些终端耦合网络设计必须显式考虑 F。
+
+\begin{table}[htbp]
+  \centering
+  \caption{A、S、F 三个最小反例的核心结果。}
+  \label{tab:counterexamples}
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{2em}表格占位：EXP-1、EXP-2、EXP-3 的后悔值结果。\vspace{2em}}}
+\end{table}
+
+\subsection{区间实验给出何时升级模型的证据}
+\label{sec:results:regime}
+
+\subsubsection{校准门控}
+\label{sec:results:calibration}
+
+校准门控结果表明，在 footprint 为零的子集中，M1 和 M2 的基线误差几乎为零。这意味着后续 recommendation map 的主要信号并不是由求解近似误差画出的。
+
+\subsubsection{A 通道边界}
+\label{sec:results:access}
+
+在关闭 F 通道后，M0 升级到 M1 的价值只有在 access restrictiveness 足够大时才会明显出现。现有结果已经表明，A 的作用更接近阈值型：在温和 access 条件下，M0 往往还能"碰巧"选对；一旦可接性约束显著收紧，忽略~A 会快速变得昂贵。
+
+\subsubsection{F 通道边界}
+\label{sec:results:footprint}
+
+F 通道隔离实验给出了目前最清晰的中尺度边界。随着 footprint severity 增大，M1 升级到 M2 的价值会显著抬升；在高脚印区间，M0/M1 的后悔值会急剧恶化，而 M2 仍能保持较低 regret。需要正面说明的是，中等脚印区间目前会受到 McCormick 线性化保守性的影响，因此这里应把"F 信息的价值"和"当前近似实现的精度"区分开来。
+
+\subsubsection{混合推荐图}
+\label{sec:results:mixed}
+
+混合参数实验的核心结果不是"永远使用最复杂模型"，而是：不同 regime 需要不同层级的终端接口。当前 recommendation map 已经显示，M1 相对 M0 有稳定增益，而 M2 在高 footprint 区间成为必要。因此，本节呈现的是\textbf{分层推荐图}（hierarchical recommendation map），而不是单一的最优模型结论。
+
+\begin{figure}[htbp]
+  \centering
+  % \includegraphics[width=\textwidth]{fig_regime_cn.pdf}
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{3em}图片占位：A/F 通道隔离实验与分层推荐图。\vspace{3em}}}
+  \caption{A/F 通道隔离实验与分层推荐图。}
+  \label{fig:regime}
+\end{figure}
+
+\subsection{现实代理案例最强地支持 footprint-dominated 场景}
+\label{sec:results:proxy}
+
+机场邻近现实代理案例表明，在约束较强的场景中，忽略终端邻域脚印会灾难性地改变网络设计。最强案例里，M0/M1 的相对后悔值可接近千分之几百，而 M2 显著降低这一误差。相反，在较宽松的场景中，粗抽象可能已经足够好。这一现实代理的最大价值在于，它把"脚印感知会改网"这件事展示成了可视化的网络拓扑差异。
+
+这一案例也有边界：当前代理图更偏 F-heavy，因此它最有力地支持的是~F 通道，而不是 A/S 的全部现实规律。
+
+\begin{figure}[htbp]
+  \centering
+  % \includegraphics[width=\textwidth]{fig_proxy_cn.pdf}
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{3em}图片占位：机场邻近场景下 relaxed 与 constrained 设计叠图。\vspace{3em}}}
+  \caption{机场邻近场景下 relaxed 与 constrained 设计叠图。}
+  \label{fig:proxy}
+\end{figure}
+
+\subsection{外部 benchmark 结果占位}
+\label{sec:results:benchmark}
+
+\textit{[待外部 benchmark 完成后补入结果。]}
+
+这一节最终将比较现有终端粗抽象、本文分层接口家族以及 integrated upper bound，统一报告：真值目标值、相对后悔值、拓扑差异、对现有方法的 gap closure，以及运行时间。核心图将是 quality--time frontier，而不是单纯的 regret 柱状图。
+
+\begin{figure}[htbp]
+  \centering
+  % \includegraphics[width=\textwidth]{fig_frontier_cn.pdf}
+  \fbox{\parbox{0.9\textwidth}{\centering\vspace{3em}图片占位：现有抽象、分层接口规划器与 integrated upper bound 的质量——时间前沿图。\vspace{3em}}}
+  \caption{现有抽象、分层接口规划器与 integrated upper bound 的质量——时间前沿图。}
+  \label{fig:frontier}
+\end{figure}
+
+
+%% ============================================================
+\section{讨论}
+\label{sec:discussion}
+%% ============================================================
+
+本文真正交付的不是某一个终端公式，而是三样东西的组合：一个分层的终端接口家族、一套"设计后统一真值重算"的评估协议，以及与之对应的模型升级规则。即使未来采用了不同的终端真值类或不同的求解器，只要研究者关心的仍是战略层网络设计，这一组合依然有使用价值。
+
+当前证据最强地支持三点。第一，终端不能总被视为普通点节点。第二，A、S、F 三条通道都可能独立改变网络设计。第三，在采用型真值类下，A 与~F 的中尺度升级边界已经能够被识别，而混合 recommendation map 进一步表明，接口层级不会退化成"始终上最复杂模型"的单一结论。
+
+与此同时，本文的结论必须严格收口。本文没有证明 A/S/F 是所有终端表示中的全局最小充分接口；S 的中尺度边界仍不如 A/F 那样干净；F 通道在中等区间的表现会受到当前双线性近似方式的影响；现实代理目前更强地支撑~F，而不是 A/S。只要这些边界在正文中被正面承认，本文的主张就是稳的：A/S/F 是在一个采用型终端真值类下，经实验检验得到的、面向战略网络设计的分层接口。
+
+
+%% ============================================================
+\section{结论}
+\label{sec:conclusions}
+%% ============================================================
+
+本文研究了一类终端耦合的低空可复用航路网络设计问题。在这类问题中，异质终端并不能总被压缩为同质节点而不改变设计结果。本文真正关心的不是如何持续扩大联合优化器，而是：战略层网络设计究竟需要从终端暴露哪些信息。
+
+为回答这一问题，本文提出一个由 A、S、F 构成的分层终端接口，并采用"按各自抽象设计——在统一真值下重算"的评估协议来直接测量设计误导。最小反例表明 A、S、F 三条通道都可能独立改变网络设计；合成网络实验表明，AS 相比 S-only 有显著提升，而 ASF 在高脚印区间成为必要；现实代理案例则进一步说明，忽略终端邻域约束会实质改写网络拓扑。
+
+因此，本文支持一个务实结论：终端复杂性不必整体抬升到战略层优化中，但也不能被无差别地压成普通节点。一套经检验的分层终端接口，再配合 regime-aware 的升级规则，为低空可复用航路网络设计提供了一条介于"过粗抽象"和"完全联合优化"之间的可行路径。
+
+
+%% ============================================================
+%% 参考文献
+%% ============================================================
+\bibliographystyle{elsarticle-harv}
+\bibliography{references}
+
+\end{document}
