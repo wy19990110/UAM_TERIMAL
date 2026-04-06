@@ -180,11 +180,45 @@
 - context states：
 - 情景总数：
 
-### EXP-6：ASF 对抗证伪（E4）
-- 搜索算法（SA / GA / 其他）：
-- 搜索预算（评估次数）：
-- ASF 距离阈值 τ：
-- 内层求解设置：
+### EXP-4B-S：S 通道隔离（新增）
+- 扫描维度与取值：
+  - ρ：
+  - coupling_m：
+  - ψ：
+  - OD concentration：
+- E_S 计算公式说明：
+- 是否固定 A=0, F=0：
+
+### EXP-4C Solver Audit（增补）
+- 审计的 φF 取值：
+- MIP gap 精度级别：
+- 是否观察到负 U12 在精度提高后消失：
+- near-exact refinement 方式：
+
+### EXP-4D Held-out Recommendation（重构）
+- 数据来源（哪些实验的结果）：
+- train/test 分割比例：
+- 阈值规则参数（E_A, E_S, E_F）：
+- recommendation accuracy：
+- 基线对比（always M1 / always M2）：
+
+### EXP-6：Incumbent Benchmark（新增）
+- 基线定义：
+  - B0（具体说明）：
+  - B1（具体说明）：
+- 候选图共享确认（是/否）：
+- truth re-evaluation 协议一致确认（是/否）：
+
+### EXP-7：Integrated Upper Bound（新增）
+- JO 实例规模（small / medium / large）：
+- MIP gap 与 time limit：
+- JO 是否收敛：
+- gap closure 主指标：
+
+### EXP-8：Scaling / Quality-Time Frontier（新增）
+- 规模梯度（nT 列表）：
+- 是否所有模型都在同一 time limit 下：
+- JO 在哪个规模开始 timeout：
 
 ---
 
