@@ -34,6 +34,62 @@ class ExperimentResult:
     truth_result: RegretResult  # M* result
     model_results: dict[ModelLevel, RegretResult] = field(default_factory=dict)
 
+    # --- Pairwise uplift metrics (新的实验要求: §一) ---
+
+    @property
+    def u01(self) -> float:
+        """Pairwise uplift M0→M1: J^truth(M0) - J^truth(M1).
+
+        Positive means M1 is better (lower truth cost) than M0.
+        """
+        m0 = self.model_results.get(ModelLevel.M0)
+        m1 = self.model_results.get(ModelLevel.M1)
+        if m0 is None or m1 is None:
+            return float("nan")
+        return m0.truth_objective - m1.truth_objective
+
+    @property
+    def u12(self) -> float:
+        """Pairwise uplift M1→M2: J^truth(M1) - J^truth(M2).
+
+        Positive means M2 is better (lower truth cost) than M1.
+        """
+        m1 = self.model_results.get(ModelLevel.M1)
+        m2 = self.model_results.get(ModelLevel.M2)
+        if m1 is None or m2 is None:
+            return float("nan")
+        return m1.truth_objective - m2.truth_objective
+
+    @property
+    def u02(self) -> float:
+        """Pairwise uplift M0→M2: J^truth(M0) - J^truth(M2)."""
+        m0 = self.model_results.get(ModelLevel.M0)
+        m2 = self.model_results.get(ModelLevel.M2)
+        if m0 is None or m2 is None:
+            return float("nan")
+        return m0.truth_objective - m2.truth_objective
+
+    def recommend_model(self, threshold: float = 0.03) -> ModelLevel:
+        """Recommend the cheapest sufficient model level.
+
+        Rule (from 新的实验要求):
+        - If U01 < threshold AND U02 < threshold → recommend M0
+        - If U01 >= threshold AND U12 < threshold → recommend M1
+        - If U12 >= threshold → recommend M2
+        """
+        j_star = self.truth_result.truth_objective
+        denom = max(abs(j_star), 1e-10)
+
+        rel_u01 = self.u01 / denom
+        rel_u12 = self.u12 / denom
+        rel_u02 = self.u02 / denom
+
+        if rel_u01 < threshold and rel_u02 < threshold:
+            return ModelLevel.M0
+        if rel_u01 >= threshold and rel_u12 < threshold:
+            return ModelLevel.M1
+        return ModelLevel.M2
+
     def summary(self) -> str:
         lines = [f"M* truth objective: {self.truth_result.truth_objective:.4f}"]
         for level, r in sorted(self.model_results.items(), key=lambda x: x[0].value):
@@ -41,6 +97,11 @@ class ExperimentResult:
                 f"  {level.name}: Δ={r.regret:.4f} ({r.relative_regret:.1%}), "
                 f"RR={r.recovery_rate:.1%}, TD_bb={r.td_backbone:.2f}, TD_conn={r.td_connectors:.2f}"
             )
+        # Append pairwise uplifts if available
+        import math
+        if not math.isnan(self.u01):
+            lines.append(f"  U01={self.u01:.4f}, U12={self.u12:.4f}, U02={self.u02:.4f}")
+            lines.append(f"  Recommended: {self.recommend_model().name}")
         return "\n".join(lines)
 
 
@@ -52,13 +113,18 @@ def run_regret_experiment(
     m0_interfaces: dict | None = None,
     m1_interfaces: dict | None = None,
     m2_interfaces: dict | None = None,
+    b0_interfaces: dict | None = None,
+    b1_interfaces: dict | None = None,
     params: SolverParams | None = None,
+    truth_level: ModelLevel = ModelLevel.MSTAR,
 ) -> ExperimentResult:
     """Run a full regret experiment.
 
-    1. Solve M* to get truth benchmark design x*
+    1. Solve truth_level (default M*) to get truth benchmark design x*
     2. Truth-evaluate x* to get J*(x*)
-    3. For each level in [M0, M1, M2]: solve -> truth-evaluate -> compute regret
+    3. For each level in levels: solve -> truth-evaluate -> compute regret
+
+    When truth_level is JO, the joint-optimization solve is used as upper bound.
 
     Returns:
         ExperimentResult with all metrics.
@@ -67,17 +133,22 @@ def run_regret_experiment(
         levels = [ModelLevel.M0, ModelLevel.M1, ModelLevel.M2]
     if params is None:
         params = SolverParams()
+    # B0/B1 use M0/M1 interfaces respectively
+    if b0_interfaces is None:
+        b0_interfaces = m0_interfaces
+    if b1_interfaces is None:
+        b1_interfaces = m1_interfaces
 
-    # Step 1: Solve M* (truth benchmark)
+    # Step 1: Solve truth benchmark (M* or JO)
     star_design = build_and_solve(
-        graph, scenarios, ModelLevel.MSTAR, params=params,
+        graph, scenarios, truth_level, params=params,
     )
 
     # Step 2: Truth-evaluate M*
     j_star, star_breakdown = truth_evaluate(star_design, graph, scenarios)
 
     truth_result = RegretResult(
-        level=ModelLevel.MSTAR,
+        level=truth_level,
         design=star_design,
         model_objective=star_design.objective,
         truth_objective=j_star,
@@ -89,10 +160,13 @@ def run_regret_experiment(
     m0_regret = None
 
     for level in levels:
+        # Route B0/B1 to their respective interfaces
+        level_m0 = b0_interfaces if level == ModelLevel.B0 else m0_interfaces
+        level_m1 = b1_interfaces if level == ModelLevel.B1 else m1_interfaces
         design = build_and_solve(
             graph, scenarios, level,
-            m0_interfaces=m0_interfaces,
-            m1_interfaces=m1_interfaces,
+            m0_interfaces=level_m0,
+            m1_interfaces=level_m1,
             m2_interfaces=m2_interfaces,
             params=params,
         )

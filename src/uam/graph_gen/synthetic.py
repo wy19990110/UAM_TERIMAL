@@ -41,6 +41,18 @@ G3_SMALL = GraphSpec(
     n_terminals=3, n_waypoints=3, target_edges=(7, 10),
     has_airport_zone=True, airport_zone_center=(0.8, 0.5), airport_zone_radius=0.15,
 )
+# G4ap: airport-adjacent (EXP-4D mixed regime)
+G4_SPEC = GraphSpec(
+    n_terminals=6, n_waypoints=4, target_edges=(15, 20),
+    has_airport_zone=True, airport_zone_center=(0.7, 0.5), airport_zone_radius=0.18,
+)
+G4_SMALL = GraphSpec(
+    n_terminals=3, n_waypoints=3, target_edges=(7, 10),
+    has_airport_zone=True, airport_zone_center=(0.7, 0.5), airport_zone_radius=0.18,
+)
+# Small/medium specs for EXP-7 (integrated upper bound, need exact solve)
+JO_SMALL = GraphSpec(n_terminals=3, n_waypoints=2, target_edges=(5, 7))
+JO_MEDIUM = GraphSpec(n_terminals=5, n_waypoints=3, target_edges=(10, 14))
 
 
 def generate_synthetic_graph(
@@ -51,6 +63,10 @@ def generate_synthetic_graph(
     access_restrictiveness: float = 0.25,
     service_asymmetry: float = 1.0,
     footprint_severity: float = 0.0,
+    coupling_m: float | None = None,
+    psi_sat: float | None = None,
+    port_misalign_deg: float = 0.0,
+    extra_connectors_per_port: int = 0,
 ) -> PortAugmentedGraph:
     rng = random.Random(seed)
     np_rng = np.random.RandomState(seed)
@@ -165,10 +181,16 @@ def generate_synthetic_graph(
             b = (0.2 + rng.uniform(0, 0.2)) * ratio
             ports.append(PortConfig(f"h{i+1}", pdir, sector_hw, a, b))
 
+        # Port misalignment for A-sensitive proxies (EXP-5)
+        if port_misalign_deg > 0:
+            for p in ports:
+                p.direction_deg = (p.direction_deg + rng.uniform(-port_misalign_deg, port_misalign_deg)) % 360
+
         coupling = {}
         for i in range(len(ports)):
             for j in range(i + 1, len(ports)):
-                coupling[(f"h{i+1}", f"h{j+1}")] = rng.uniform(0.05, 0.2)
+                m_val = coupling_m if coupling_m is not None else rng.uniform(0.05, 0.2)
+                coupling[(f"h{i+1}", f"h{j+1}")] = m_val
 
         context = "open-city"
         if spec.has_airport_zone:
@@ -176,13 +198,14 @@ def generate_synthetic_graph(
             if dist_ap < spec.airport_zone_radius * 2:
                 context = "airport-adjacent"
 
+        effective_psi = psi_sat if psi_sat is not None else rng.uniform(1, 5)
         terminals[tid] = TerminalConfig(
             terminal_id=tid, x=tx, y=ty,
             ports=ports, pads=rng.randint(1, 3), gates=rng.choice([0, 2, 4]),
             organization=rng.choice(["direct", "single-ring", "multi-ring"]),
             procedure_type=rng.choice(["procedure-like", "path-like"]),
             context_type=context,
-            mu_bar=3.0 + rng.uniform(0, 3), psi_sat=rng.uniform(1, 5),
+            mu_bar=3.0 + rng.uniform(0, 3), psi_sat=effective_psi,
             cross_port_coupling=coupling, footprint_radius_hops=1,
         )
 
@@ -210,6 +233,24 @@ def generate_synthetic_graph(
             d = base.compute_edge_direction(base.backbone_edges[eid], tid)
             connectors[cid] = ConnectorArc(cid, eid, tid, pid, d, 0.05 + rng.random() * 0.05)
 
+    # Extra non-incident connectors for A-sensitive proxies (EXP-5)
+    if extra_connectors_per_port > 0:
+        all_eids = list(backbone.keys())
+        for tid, terminal in terminals.items():
+            for port in terminal.ports:
+                existing = {c.edge_id for c in connectors.values()
+                            if c.terminal_id == tid and c.port_id == port.port_id}
+                non_incident = [e for e in all_eids if e not in existing]
+                rng.shuffle(non_incident)
+                for eid in non_incident[:extra_connectors_per_port]:
+                    cidx += 1
+                    cid = f"C{cidx}"
+                    d = base.compute_edge_direction(backbone[eid], tid)
+                    connectors[cid] = ConnectorArc(cid, eid, tid, port.port_id, d,
+                                                   0.05 + rng.random() * 0.05)
+                    # These are NOT admissible under truth — M0 doesn't know that
+                    admissibility[(tid, port.port_id, eid)] = False
+
     return PortAugmentedGraph(base=base, connectors=connectors, admissibility=admissibility)
 
 
@@ -218,15 +259,100 @@ def generate_demand(
     intensity: float = 1.0,
     seed: int = 42,
     coverage: float = 0.4,
+    concentration: float = 0.0,
+    concentrate_on: str | None = None,
 ) -> list:
+    """Generate demand scenarios.
+
+    Args:
+        concentration: 0.0 = uniform, 1.0 = all ODs target a single terminal.
+            Used by EXP-4B-S to test S-channel activation under load concentration.
+        concentrate_on: if set, this terminal gets the concentrated ODs.
+    """
     from uam.core.demand import DemandScenario
     rng = random.Random(seed)
     tids = list(graph.terminals.keys())
     od = {}
+
+    # Pick concentration target
+    if concentrate_on is None and concentration > 0:
+        concentrate_on = rng.choice(tids)
+
     for src in tids:
         for dst in tids:
             if src == dst:
                 continue
             if rng.random() < coverage:
-                od[(src, dst)] = (1.0 + rng.random() * 2.0) * intensity
+                base_demand = (1.0 + rng.random() * 2.0) * intensity
+                # Boost demand toward concentration target
+                if concentration > 0 and concentrate_on:
+                    if dst == concentrate_on or src == concentrate_on:
+                        base_demand *= 1.0 + concentration * 2.0
+                    else:
+                        base_demand *= max(0.3, 1.0 - concentration * 0.5)
+                od[(src, dst)] = base_demand
     return [DemandScenario(scenario_id="w1", od_demand=od, probability=1.0, unmet_penalty=100.0)]
+
+
+# --- Proxy graph generators for EXP-5 ---
+
+def generate_a_sensitive_proxy(
+    seed: int = 42,
+    *,
+    demand_intensity: float = 1.0,
+    access_restrictiveness: float = 0.4,
+) -> PortAugmentedGraph:
+    """A-sensitive proxy: port directions offset from incident edges.
+
+    Key: M0 sees extra (inadmissible) connectors and has no way to reject them.
+    """
+    return generate_synthetic_graph(
+        G1_SMALL, seed=seed,
+        demand_intensity=demand_intensity,
+        access_restrictiveness=access_restrictiveness,
+        service_asymmetry=1.0,
+        footprint_severity=0.0,
+        port_misalign_deg=45.0,
+        extra_connectors_per_port=2,
+    )
+
+
+def generate_s_sensitive_proxy(
+    seed: int = 42,
+    *,
+    demand_intensity: float = 1.0,
+    coupling_m: float = 0.4,
+    psi_sat: float = 3.0,
+) -> PortAugmentedGraph:
+    """S-sensitive proxy: high cross-port coupling, ODs converge on shared terminals.
+
+    Key: M0's aggregate service misses port-level congestion asymmetry.
+    """
+    return generate_synthetic_graph(
+        G1_SMALL, seed=seed,
+        demand_intensity=demand_intensity,
+        access_restrictiveness=0.0,  # all admissible — isolate S channel
+        service_asymmetry=2.5,
+        footprint_severity=0.0,
+        coupling_m=coupling_m,
+        psi_sat=psi_sat,
+    )
+
+
+def generate_f_sensitive_proxy(
+    seed: int = 42,
+    *,
+    demand_intensity: float = 1.0,
+    footprint_severity: float = 0.5,
+) -> PortAugmentedGraph:
+    """F-sensitive proxy: airport-adjacent with protection zone.
+
+    Key: M1 (AS) misses footprint penalties near the airport zone.
+    """
+    return generate_synthetic_graph(
+        G3_SMALL, seed=seed,
+        demand_intensity=demand_intensity,
+        access_restrictiveness=0.25,
+        service_asymmetry=1.5,
+        footprint_severity=footprint_severity,
+    )

@@ -23,6 +23,11 @@ class ModelLevel(Enum):
     M1 = auto()
     M2 = auto()
     MSTAR = auto()
+    # Incumbent baselines for EXP-6/7/8
+    B0 = auto()   # node + aggregate surrogate (literature incumbent)
+    B1 = auto()   # A-only or A+coarse-service (terminal-aware incumbent)
+    # Joint optimization upper bound for EXP-7
+    JO = auto()    # integrated upper bound (same solve as MSTAR, tracked separately)
 
 
 @dataclass
@@ -52,9 +57,17 @@ def build_and_solve(
     model.setParam("MIPGap", params.mip_gap)
     if params.threads > 0:
         model.setParam("Threads", params.threads)
+    # JO is solved identically to MSTAR (same truth model), just tracked as upper bound
+    effective_level = ModelLevel.MSTAR if level == ModelLevel.JO else level
+    # B0 solves like M0 (aggregate surrogate); B1 solves like M1 (A+coarse service)
+    if effective_level == ModelLevel.B0:
+        effective_level = ModelLevel.M0
+    elif effective_level == ModelLevel.B1:
+        effective_level = ModelLevel.M1
+
     # NonConvex=2 only needed when bilinear terms exist (M* footprint load-sensitivity × x)
     # Gurobi restricted license may reject some non-convex models
-    has_bilinear = (level == ModelLevel.MSTAR and
+    has_bilinear = (effective_level == ModelLevel.MSTAR and
                     any(t.footprint_load_sensitivity for t in graph.terminals.values()))
     if has_bilinear:
         model.setParam("NonConvex", 2)
@@ -170,8 +183,8 @@ def build_and_solve(
                         total += f[(arc.arc_id, k, sid)]
             model.addConstr(total <= 1000 * y[cid], name=f"ca_{cid}_{sid}")
 
-    # 4. Admissibility (not for M0)
-    if level != ModelLevel.M0:
+    # 4. Admissibility (not for M0/B0)
+    if effective_level not in (ModelLevel.M0,):
         for cid, conn in connectors.items():
             key = (conn.terminal_id, conn.port_id, conn.edge_id)
             if not graph.admissibility.get(key, False):
@@ -219,7 +232,7 @@ def build_and_solve(
         # Terminal cost (model-level dependent)
         for tid, terminal in terminals.items():
             _add_terminal_cost(
-                model, obj, terminal, port_load, x, sid, pw, level,
+                model, obj, terminal, port_load, x, sid, pw, effective_level,
                 m0_interfaces, m1_interfaces, m2_interfaces, graph,
             )
 
