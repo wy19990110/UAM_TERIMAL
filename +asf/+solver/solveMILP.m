@@ -11,6 +11,12 @@ function design = solveMILP(inst, level, ifaces, opts)
         opts struct = struct('nPwl', 15, 'verbose', false)
     end
 
+    % === Level 映射: B0→M0, B1→M1, JO→Mstar ===
+    effectiveLevel = level;
+    if level == "B0", effectiveLevel = "M0"; end
+    if level == "B1", effectiveLevel = "M1"; end
+    if level == "JO", effectiveLevel = "Mstar"; end
+
     edgeIds = string(inst.edges.keys);
     connIds = string(inst.connectors.keys);
     nE = numel(edgeIds);
@@ -72,13 +78,13 @@ function design = solveMILP(inst, level, ifaces, opts)
     for pi = 1:nP
         tid = portList{pi}.tid;
         pid = portList{pi}.pid;
-        if level == "M0" && ifaces.isKey(tid)
+        if effectiveLevel == "M0" && ifaces.isKey(tid)
             m0 = ifaces(tid);
             t = inst.terminals(tid);
             nPorts = numel(t.ports);
             portA(pi) = m0.aBar / nPorts;
             portB(pi) = m0.bBar / nPorts;
-        elseif (level == "M1" || level == "M2") && ifaces.isKey(tid)
+        elseif (effectiveLevel == "M1" || effectiveLevel == "M2") && ifaces.isKey(tid)
             m1 = ifaces(tid);
             if isfield(m1.portService, pid)
                 portA(pi) = m1.portService.(pid).a;
@@ -105,7 +111,7 @@ function design = solveMILP(inst, level, ifaces, opts)
     % McCormick 辅助变量 w（仅 M2 + loadSensitivity）
     mcList = [];  % struct array: edgeIdx, portIdx, rho, lamMax
     oMc = nVars;
-    if level == "M2"
+    if effectiveLevel == "M2"
         for ti = 1:numel(tkeys)
             if ~ifaces.isKey(tkeys{ti}), continue; end
             m2 = ifaces(tkeys{ti});
@@ -175,7 +181,7 @@ function design = solveMILP(inst, level, ifaces, opts)
     end
 
     % M2 footprint nominal penalty on x
-    if level == "M2"
+    if effectiveLevel == "M2"
         for ti = 1:numel(tkeys)
             if ~ifaces.isKey(tkeys{ti}), continue; end
             m2 = ifaces(tkeys{ti});
@@ -197,7 +203,7 @@ function design = solveMILP(inst, level, ifaces, opts)
                 end
             end
         end
-    elseif level == "Mstar"
+    elseif effectiveLevel == "Mstar"
         for ti = 1:numel(tkeys)
             t = inst.terminals(tkeys{ti});
             fnames = fieldnames(t.fpBasePenalty);
@@ -310,8 +316,8 @@ function design = solveMILP(inst, level, ifaces, opts)
     beq = [];
     eqIdx = 0;
 
-    % C4: Admissibility (M0 skips)
-    if level ~= "M0"
+    % C4: Admissibility (M0 and B0 skip)
+    if effectiveLevel ~= "M0"
         for ci = 1:nC
             c = inst.connectors(char(connIds(ci)));
             key = char(c.terminalId + "_" + c.portId + "_" + c.edgeId);

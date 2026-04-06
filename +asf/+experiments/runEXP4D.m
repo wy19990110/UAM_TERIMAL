@@ -1,7 +1,11 @@
 function runEXP4D(outDir)
-    % runEXP4D 混合 regime 实验
-    %   4 图族 × 4 seeds × ~30 组合 ≈ 480 实例
-    %   输出: model recommendation map on (E_A, E_S, E_F) 空间
+    % runEXP4D Held-out recommendation map (规则式分层规划器)
+    %   按新的实验要求 §一.6:
+    %   1) 收集实例数据: E_A/E_S/E_F + j_m0/j_m1/j_m2
+    %   2) 70/30 train/test split
+    %   3) Train: grid search 阈值规则 (E_A, E_S, E_F) -> M0/M1/M2
+    %   4) Test: accuracy, excess regret, vs "always M1"/"always M2"
+    %   5) 导出 calibrated_rule.mat 供 EXP-6/7/8 使用
     arguments
         outDir (1,1) string = "results/exp4d"
     end
@@ -10,11 +14,12 @@ function runEXP4D(outDir)
     logFile = fullfile(outDir, "exp4d_log.txt");
     cpFile = fullfile(outDir, "exp4d_checkpoint.mat");
     resultFile = fullfile(outDir, "exp4d_results.mat");
+    ruleFile = fullfile(outDir, "calibrated_rule.mat");
 
     flog = fopen(logFile, 'a');
     logmsg = @(m) fprintf(flog, '[%s] %s\n', datestr(now,'HH:MM:SS'), m);
 
-    % 4 图族
+    % ========== 阶段一: 数据收集 ==========
     families = struct('name',{'G1s','G2s','G3a','G4ap'}, ...
         'spec',{struct('nT',4,'nW',3,'targetEdges',[7,9]), ...
                 struct('nT',5,'nW',4,'targetEdges',[10,13]), ...
@@ -42,7 +47,7 @@ function runEXP4D(outDir)
         end
     end
     total = numel(combos);
-    logmsg(sprintf('=== EXP-4D 混合regime: %d 实例 ===', total));
+    logmsg(sprintf('=== EXP-4D Held-out: %d 实例 ===', total));
 
     if exist(cpFile, 'file')
         cp = load(cpFile);
@@ -87,15 +92,17 @@ function runEXP4D(outDir)
             r.family = fname; r.seed = sd; r.rho = rho;
             r.alphaA = aA; r.kappaS = kS; r.phiF = pF;
             r.jStar = res.star.jTruth;
+            r.jM0 = res.M0.jTruth; r.jM1 = res.M1.jTruth; r.jM2 = res.M2.jTruth;
             r.m0Rel = res.M0.relRegret; r.m1Rel = res.M1.relRegret; r.m2Rel = res.M2.relRegret;
-            r.U01 = res.relU01; r.U12 = res.relU12; r.U02 = res.relU02;
-            r.recommendation = res.recommendation;
             r.E_A = inst.excitation.E_A; r.E_S = inst.excitation.E_S; r.E_F = inst.excitation.E_F;
-            r.m0TD = res.M0.tdBB; r.m1TD = res.M1.tdBB; r.m2TD = res.M2.tdBB;
+            % Truth-best-in-family
+            [~, bestIdx] = min([r.jM0, r.jM1, r.jM2]);
+            labels = ["M0","M1","M2"];
+            r.truthBest = labels(bestIdx);
             r.time = elapsed; r.error = "";
             results{idx} = r;
-            logmsg(sprintf('  Rec=%s U01=%.1f%% U12=%.1f%% (%.1fs)', ...
-                res.recommendation, res.relU01*100, res.relU12*100, elapsed));
+            logmsg(sprintf('  Best=%s E_A=%.3f E_S=%.3f E_F=%.3f (%.1fs)', ...
+                r.truthBest, r.E_A, r.E_S, r.E_F, elapsed));
         catch ME
             elapsed = toc(t0);
             r = struct(); r.family = fname; r.seed = sd; r.rho = rho;
@@ -108,8 +115,135 @@ function runEXP4D(outDir)
         save(cpFile, 'results', 'completed', 'combos');
     end
 
-    save(resultFile, 'results', 'combos');
+    % ========== 阶段二: Train/Test Split + Rule Calibration ==========
+    logmsg('=== 阶段二: Rule Calibration ===');
+
+    % 收集有效记录
+    validIdx = [];
+    for idx = 1:total
+        r = results{idx};
+        if ~isempty(r) && (isempty(r.error) || r.error == "")
+            validIdx(end+1) = idx; %#ok<AGROW>
+        end
+    end
+    nValid = numel(validIdx);
+    logmsg(sprintf('有效实例: %d/%d', nValid, total));
+
+    if nValid < 10
+        logmsg('有效实例不足, 跳过 calibration');
+        save(resultFile, 'results', 'combos');
+        fclose(flog);
+        return;
+    end
+
+    % 70/30 split
+    rng(42);
+    perm = randperm(nValid);
+    nTrain = round(nValid * 0.7);
+    trainIdx = validIdx(perm(1:nTrain));
+    testIdx = validIdx(perm(nTrain+1:end));
+
+    % Grid search on train
+    bestAccuracy = -1;
+    bestRule = struct('eaThresh', 0.3, 'esThresh', 0.5, 'efThresh', 0.2);
+
+    eaGrid = 0.1:0.1:0.7;
+    esGrid = 0.2:0.1:1.0;
+    efGrid = 0.1:0.1:0.5;
+
+    for ea = eaGrid
+        for es = esGrid
+            for ef = efGrid
+                correct = 0;
+                for ii = 1:numel(trainIdx)
+                    r = results{trainIdx(ii)};
+                    rec = applyRule(r.E_A, r.E_S, r.E_F, ea, es, ef);
+                    if rec == r.truthBest
+                        correct = correct + 1;
+                    end
+                end
+                acc = correct / numel(trainIdx);
+                if acc > bestAccuracy
+                    bestAccuracy = acc;
+                    bestRule = struct('eaThresh', ea, 'esThresh', es, 'efThresh', ef);
+                end
+            end
+        end
+    end
+
+    logmsg(sprintf('最佳规则: E_A>=%.1f→M1, E_S>=%.1f→M1, E_F>=%.1f→M2 (train acc=%.1f%%)', ...
+        bestRule.eaThresh, bestRule.esThresh, bestRule.efThresh, bestAccuracy*100));
+
+    % ========== 阶段三: Test Set 评估 ==========
+    nTest = numel(testIdx);
+    correct = 0;
+    totalExcess = 0;
+    alwaysM1Excess = 0;
+    alwaysM2Excess = 0;
+    recCounts = struct('M0', 0, 'M1', 0, 'M2', 0);
+
+    for ii = 1:nTest
+        r = results{testIdx(ii)};
+        rec = applyRule(r.E_A, r.E_S, r.E_F, bestRule.eaThresh, bestRule.esThresh, bestRule.efThresh);
+        recCounts.(char(rec)) = recCounts.(char(rec)) + 1;
+
+        if rec == r.truthBest
+            correct = correct + 1;
+        end
+
+        bestJ = min([r.jM0, r.jM1, r.jM2]);
+        jMap = struct('M0', r.jM0, 'M1', r.jM1, 'M2', r.jM2);
+        recJ = jMap.(char(rec));
+        totalExcess = totalExcess + max(0, recJ - bestJ);
+        alwaysM1Excess = alwaysM1Excess + max(0, r.jM1 - bestJ);
+        alwaysM2Excess = alwaysM2Excess + max(0, r.jM2 - bestJ);
+    end
+
+    evaluation = struct();
+    evaluation.accuracy = correct / max(nTest, 1);
+    evaluation.meanExcessRegret = totalExcess / max(nTest, 1);
+    evaluation.alwaysM1Excess = alwaysM1Excess / max(nTest, 1);
+    evaluation.alwaysM2Excess = alwaysM2Excess / max(nTest, 1);
+    evaluation.modelDistribution = recCounts;
+    evaluation.rule = bestRule;
+    evaluation.nTrain = nTrain;
+    evaluation.nTest = nTest;
+
+    logmsg(sprintf('Test: accuracy=%.1f%%, excess=%.4f, alwaysM1=%.4f, alwaysM2=%.4f', ...
+        evaluation.accuracy*100, evaluation.meanExcessRegret, ...
+        evaluation.alwaysM1Excess, evaluation.alwaysM2Excess));
+    logmsg(sprintf('分布: M0=%d, M1=%d, M2=%d', recCounts.M0, recCounts.M1, recCounts.M2));
+
+    % 保存
+    save(resultFile, 'results', 'combos', 'evaluation');
+
+    % 导出 calibrated rule（供 EXP-6/7/8 使用）
+    calibratedRule = bestRule;
+    save(ruleFile, 'calibratedRule');
+    logmsg(sprintf('Calibrated rule 已保存到 %s', ruleFile));
+
     logmsg('=== EXP-4D 完成 ===');
     fclose(flog);
-    fprintf('EXP-4D 完成: %d 实例\n', total);
+
+    % 控制台输出
+    fprintf('\n=== EXP-4D Held-out Recommendation Map ===\n');
+    fprintf('Rule: E_A>=%.2f→M1, E_S>=%.2f→M1, E_F>=%.2f→M2\n', ...
+        bestRule.eaThresh, bestRule.esThresh, bestRule.efThresh);
+    fprintf('Train accuracy: %.1f%% (%d instances)\n', bestAccuracy*100, nTrain);
+    fprintf('Test accuracy:  %.1f%% (%d instances)\n', evaluation.accuracy*100, nTest);
+    fprintf('Excess regret:  PR=%.4f, alwaysM1=%.4f, alwaysM2=%.4f\n', ...
+        evaluation.meanExcessRegret, evaluation.alwaysM1Excess, evaluation.alwaysM2Excess);
+    fprintf('Distribution: M0=%d, M1=%d, M2=%d\n', recCounts.M0, recCounts.M1, recCounts.M2);
+end
+
+
+function rec = applyRule(E_A, E_S, E_F, eaThresh, esThresh, efThresh)
+    % 阈值规则: E_F >= thresh → M2; E_A >= thresh or E_S >= thresh → M1; else M0
+    if E_F >= efThresh
+        rec = "M2";
+    elseif E_A >= eaThresh || E_S >= esThresh
+        rec = "M1";
+    else
+        rec = "M0";
+    end
 end

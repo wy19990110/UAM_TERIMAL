@@ -1,9 +1,9 @@
 function results = computeRegret(inst, levels, ifaces, opts)
-    % computeRegret 编排 M0/M1/M2/M* → truth evaluate → regret
+    % computeRegret 编排任意抽象层级 → truth evaluate → regret
     %
-    %   levels: string array, 如 ["M0","M1","M2"]
+    %   levels: string array, 如 ["M0","M1","M2"] 或含 "B0","B1","JO"
     %   ifaces: containers.Map level -> (containers.Map tid -> iface struct)
-    %   opts: struct with .nPwl, .verbose
+    %   opts: struct with .nPwl, .verbose, .truthLevel (默认 "Mstar")
     arguments
         inst asf.core.ProblemInstance
         levels (:,1) string = ["M0";"M1";"M2"]
@@ -11,16 +11,26 @@ function results = computeRegret(inst, levels, ifaces, opts)
         opts struct = struct('nPwl', 7, 'verbose', false)
     end
 
-    % 1. 求解 M* + 各抽象层级，收集所有设计
-    if opts.verbose, fprintf('求解 M*...\n'); end
-    starDesign = asf.solver.solveMILP(inst, "Mstar", containers.Map(), opts);
+    % Truth benchmark level（默认 Mstar，EXP-7 可传 "JO"）
+    if isfield(opts, 'truthLevel')
+        truthLevel = opts.truthLevel;
+    else
+        truthLevel = "Mstar";
+    end
+
+    % 1. 求解 truth benchmark + 各抽象层级，收集所有设计
+    if opts.verbose, fprintf('求解 %s (truth benchmark)...\n', truthLevel); end
+    tStar0 = tic;
+    starDesign = asf.solver.solveMILP(inst, truthLevel, containers.Map(), opts);
+    starTime = toc(tStar0);
     [jStarRaw, starBD] = asf.solver.truthEvaluate(starDesign, inst);
 
     % 收集所有设计及其 truth 值，取全局最优作为 J*
     allDesigns = {starDesign};
     allJTruth = jStarRaw;
     allBD = {starBD};
-    allLabels = {"Mstar"};
+    allLabels = {char(truthLevel)};
+    allTimes = starTime;
 
     % 2. 各抽象层级
     for li = 1:numel(levels)
@@ -30,12 +40,15 @@ function results = computeRegret(inst, levels, ifaces, opts)
         if ifaces.isKey(char(lv))
             lvIfaces = ifaces(char(lv));
         end
+        tLv0 = tic;
         design = asf.solver.solveMILP(inst, lv, lvIfaces, opts);
+        lvTime = toc(tLv0);
         [jTruth, bd] = asf.solver.truthEvaluate(design, inst);
         allDesigns{end+1} = design; %#ok<AGROW>
         allJTruth(end+1) = jTruth; %#ok<AGROW>
         allBD{end+1} = bd; %#ok<AGROW>
         allLabels{end+1} = char(lv); %#ok<AGROW>
+        allTimes(end+1) = lvTime; %#ok<AGROW>
     end
 
     % 取 truth 口径下的全局最优作为 J*（跨所有模型选最好的设计）
@@ -47,6 +60,7 @@ function results = computeRegret(inst, levels, ifaces, opts)
     results.star.jTruth = jStar;
     results.star.breakdown = starBD;
     results.star.source = allLabels{bestIdx};
+    results.star.solveTime = allTimes(1);  % truth benchmark solve time
 
     if opts.verbose
         fprintf('J* = %.4f (来自 %s), edges=%s\n', jStar, allLabels{bestIdx}, strjoin(starDesign.activeEdges, ','));
@@ -54,9 +68,10 @@ function results = computeRegret(inst, levels, ifaces, opts)
 
     % 3. 计算 regret（相对全局最优 J*）
     m0Regret = NaN;
+    b0Regret = NaN;
     for li = 1:numel(levels)
         lv = levels(li);
-        design = allDesigns{1 + li};  % +1 因为 allDesigns{1} 是 Mstar
+        design = allDesigns{1 + li};  % +1 因为 allDesigns{1} 是 truth benchmark
         jTruth = allJTruth(1 + li);
         bd = allBD{1 + li};
 
@@ -70,14 +85,20 @@ function results = computeRegret(inst, levels, ifaces, opts)
         r.relRegret = relDelta;
         r.tdBB = design.topologyDistBB(starDesign);
         r.tdConn = design.topologyDistConn(starDesign);
+        r.solveTime = allTimes(1 + li);
 
         if lv == "M0"
             m0Regret = delta;
         end
+        if lv == "B0"
+            b0Regret = delta;
+        end
 
-        % Recovery rate
-        if ~isnan(m0Regret) && m0Regret > 1e-10
-            r.recoveryRate = 1 - delta / m0Regret;
+        % Recovery rate (相对 M0 或 B0 中较大的)
+        refRegret = m0Regret;
+        if isnan(refRegret), refRegret = b0Regret; end
+        if ~isnan(refRegret) && refRegret > 1e-10
+            r.recoveryRate = 1 - delta / refRegret;
         else
             r.recoveryRate = NaN;
         end
@@ -85,16 +106,19 @@ function results = computeRegret(inst, levels, ifaces, opts)
         results.(char(lv)) = r;
 
         if opts.verbose
-            fprintf('  %s: J_truth=%.4f, Δ=%.4f (%.1f%%), TD=%.2f\n', ...
-                lv, jTruth, delta, relDelta*100, r.tdBB);
+            fprintf('  %s: J_truth=%.4f, Δ=%.4f (%.1f%%), TD=%.2f (%.1fs)\n', ...
+                lv, jTruth, delta, relDelta*100, r.tdBB, r.solveTime);
         end
     end
 
-    % 重算 recovery rates
-    if ~isnan(m0Regret) && m0Regret > 1e-10
+    % 重算 recovery rates（M0 可能不在第一个位置）
+    refRegret = NaN;
+    if ~isnan(m0Regret), refRegret = m0Regret;
+    elseif ~isnan(b0Regret), refRegret = b0Regret; end
+    if ~isnan(refRegret) && refRegret > 1e-10
         for li = 1:numel(levels)
             lv = char(levels(li));
-            results.(lv).recoveryRate = 1 - results.(lv).regret / m0Regret;
+            results.(lv).recoveryRate = 1 - results.(lv).regret / refRegret;
         end
     end
 

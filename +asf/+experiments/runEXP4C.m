@@ -1,7 +1,11 @@
 function runEXP4C(outDir)
-    % runEXP4C F 通道隔离实验
-    %   ~150 实例，A/S 固定(moderate)，扫 φF × ρ
-    %   输出: U12 heatmap on (φF × ρ) 平面
+    % runEXP4C F 通道隔离 + Solver Audit 实验
+    %   按新的实验要求 §一.5:
+    %   - A/S 固定(moderate)，扫 φF × ρ
+    %   - 在 φF∈{0.1,0.2,0.3,0.4,0.5} 上加 solver audit:
+    %     对每个实例跑 3 个精度等级 (nPwl=7,15,31)
+    %   - 目标: 分离 "F 信息本身有价值" vs "负 U12 是 PwL 伪影"
+    %   - 输出: U12 heatmap + convergence table
     arguments
         outDir (1,1) string = "results/exp4c"
     end
@@ -26,6 +30,11 @@ function runEXP4C(outDir)
     rhoVals = [0.5, 0.8, 1.0, 1.2, 1.5];
     phiFVals = [0, 0.1, 0.2, 0.3, 0.5, 0.7];
 
+    % Audit 精度等级
+    auditNPwl = [7, 15, 31];
+    % Audit 只在这些 φF 值上做
+    auditPhiF = [0.1, 0.2, 0.3, 0.4, 0.5];
+
     combos = {};
     for fi = 1:numel(families)
         for si = 1:numel(seeds)
@@ -37,7 +46,7 @@ function runEXP4C(outDir)
         end
     end
     total = numel(combos);
-    logmsg(sprintf('=== EXP-4C F隔离: %d 实例 ===', total));
+    logmsg(sprintf('=== EXP-4C F隔离+Audit: %d 实例 ===', total));
 
     if exist(cpFile, 'file')
         cp = load(cpFile);
@@ -85,6 +94,32 @@ function runEXP4C(outDir)
             r.recommendation = res.recommendation;
             r.E_A = inst.excitation.E_A; r.E_S = inst.excitation.E_S; r.E_F = inst.excitation.E_F;
             r.time = elapsed; r.error = "";
+
+            % === Solver Audit: 多精度 nPwl ===
+            needsAudit = any(abs(auditPhiF - pF) < 1e-6);
+            if needsAudit
+                r.audit = struct();
+                for ai = 1:numel(auditNPwl)
+                    nPwl = auditNPwl(ai);
+                    auditOpts = struct('nPwl', nPwl, 'verbose', false);
+                    tAudit = tic;
+                    auditRes = asf.solver.computeRegret(inst, ["M1";"M2"], ifaces, auditOpts);
+                    auditTime = toc(tAudit);
+
+                    tag = sprintf('nPwl%d', nPwl);
+                    r.audit.(tag).m1Rel = auditRes.M1.relRegret;
+                    r.audit.(tag).m2Rel = auditRes.M2.relRegret;
+                    if isfield(auditRes, 'U12')
+                        r.audit.(tag).U12 = auditRes.U12;
+                        r.audit.(tag).relU12 = auditRes.relU12;
+                        r.audit.(tag).negU12 = auditRes.U12 < 0;
+                    end
+                    r.audit.(tag).time = auditTime;
+                end
+                logmsg(sprintf('  Audit: nPwl=[7→U12=%.4f, 15→%.4f, 31→%.4f]', ...
+                    r.audit.nPwl7.relU12, r.audit.nPwl15.relU12, r.audit.nPwl31.relU12));
+            end
+
             results{idx} = r;
             logmsg(sprintf('  U12=%.1f%% E_F=%.3f (%.1fs)', res.relU12*100, inst.excitation.E_F, elapsed));
         catch ME
@@ -99,8 +134,33 @@ function runEXP4C(outDir)
         save(cpFile, 'results', 'completed', 'combos');
     end
 
+    % === Audit 汇总 ===
+    logmsg('=== Solver Audit 汇总 ===');
+    for ai = 1:numel(auditPhiF)
+        pF = auditPhiF(ai);
+        u12Vals = struct('nPwl7',[],'nPwl15',[],'nPwl31',[]);
+        for idx = 1:total
+            r = results{idx};
+            if isempty(r) || ~isempty(r.error), continue; end
+            if abs(r.phiF - pF) > 1e-6, continue; end
+            if ~isfield(r, 'audit'), continue; end
+            for ni = 1:numel(auditNPwl)
+                tag = sprintf('nPwl%d', auditNPwl(ni));
+                if isfield(r.audit, tag)
+                    u12Vals.(tag)(end+1) = r.audit.(tag).relU12;
+                end
+            end
+        end
+        logmsg(sprintf('  phiF=%.1f: nPwl7=%.2f%% nPwl15=%.2f%% nPwl31=%.2f%%', ...
+            pF, safeMean(u12Vals.nPwl7)*100, safeMean(u12Vals.nPwl15)*100, safeMean(u12Vals.nPwl31)*100));
+    end
+
     save(resultFile, 'results', 'combos');
     logmsg('=== EXP-4C 完成 ===');
     fclose(flog);
     fprintf('EXP-4C 完成: %d 实例\n', total);
+end
+
+function m = safeMean(v)
+    if isempty(v), m = NaN; else, m = mean(v); end
 end

@@ -7,6 +7,10 @@ function inst = buildSynthetic(spec, seed, params)
     %   spec: struct with .nT, .nW, .targetEdges([min,max]),
     %         .hasAirport, .airportCenter, .airportRadius
     %   params: struct with .alphaA, .kappaS, .phiF, .rho
+    %     可选: .couplingM (固定跨端口耦合值, NaN=随机)
+    %           .psiSat   (固定饱和惩罚系数, NaN=随机)
+    %           .concentration (OD 集中度, 0=均匀, 1=全部集中到单个 terminal)
+    %           .portMisalignDeg (port 方向额外偏移角度, 0=不偏移)
     arguments
         spec struct
         seed (1,1) double = 42
@@ -132,6 +136,10 @@ function inst = buildSynthetic(spec, seed, params)
         % === Port 方向随机偏移（核心改动）===
         % alphaA 越大偏移越大 → 更多 connector 变得 inadmissible → A 有区分力
         offsetRange = 20 + 40 * alphaA;  % [20°, 60°]
+        % 额外 portMisalignDeg 偏移（EXP-5 A-sensitive proxy 用）
+        if isfield(params, 'portMisalignDeg') && params.portMisalignDeg > 0
+            offsetRange = offsetRange + params.portMisalignDeg;
+        end
         for pi2 = 1:numel(portDirs)
             portDirs(pi2) = mod(portDirs(pi2) + (2*rand-1)*offsetRange, 360);
         end
@@ -147,7 +155,11 @@ function inst = buildSynthetic(spec, seed, params)
         for pi2 = 1:nPorts
             for pj = pi2+1:nPorts
                 fn = sprintf('h%d_h%d', pi2, pj);
-                coupling.(fn) = 0.05 + rand*0.15;
+                if isfield(params, 'couplingM') && ~isnan(params.couplingM)
+                    coupling.(fn) = params.couplingM;
+                else
+                    coupling.(fn) = 0.05 + rand*0.15;
+                end
             end
         end
 
@@ -179,8 +191,13 @@ function inst = buildSynthetic(spec, seed, params)
             end
         end
 
+        if isfield(params, 'psiSat') && ~isnan(params.psiSat)
+            effPsiSat = params.psiSat;
+        else
+            effPsiSat = 1+rand*4;
+        end
         inst.terminals(tid) = asf.core.TerminalConfig(tids(ti), tpos(1), tpos(2), ports, ...
-            'muBar', 3+rand*3, 'psiSat', 1+rand*4, 'coupling', coupling, ...
+            'muBar', 3+rand*3, 'psiSat', effPsiSat, 'coupling', coupling, ...
             'fpRadius', 1, 'fpBasePenalty', fpBP, 'fpLoadSens', fpLS, ...
             'blockedEdges', blocked);
     end
@@ -293,13 +310,28 @@ function inst = buildSynthetic(spec, seed, params)
 
     inst.excitation = struct('E_A', E_A, 'E_S', E_S, 'E_F', E_F);
 
-    % === 6. 需求 ===
+    % === 6. 需求（含 concentration 支持）===
+    concentration = 0;
+    if isfield(params, 'concentration'), concentration = params.concentration; end
+    % 集中目标 terminal
+    concentrateOn = "";
+    if concentration > 0
+        concentrateOn = tids(randi(nT));
+    end
     for i = 1:nT
         for j = 1:nT
             if i == j, continue; end
             if rand < 0.4
+                baseDemand = (1+rand*2) * params.rho;
+                if concentration > 0 && concentrateOn ~= ""
+                    if tids(j) == concentrateOn || tids(i) == concentrateOn
+                        baseDemand = baseDemand * (1 + concentration * 2);
+                    else
+                        baseDemand = baseDemand * max(0.3, 1 - concentration * 0.5);
+                    end
+                end
                 key = char(tids(i) + "-" + tids(j));
-                inst.odDemand(key) = (1+rand*2) * params.rho;
+                inst.odDemand(key) = baseDemand;
             end
         end
     end
