@@ -131,5 +131,173 @@ classdef InstanceLibrary
             inst = uam.core.NetworkInstance(terminals, corridors, scenarios, ...
                 styleOptions, 100);
         end
+        function inst = buildCityInstance(nT, seed, demandLevel, footprintLevel)
+            % buildCityInstance 参数化城市级实例生成器
+            %
+            %   输入:
+            %     nT             - 终端数量 (8-12)
+            %     seed           - 随机种子（可复现）
+            %     demandLevel    - 需求强度 ("low", "medium", "high")
+            %     footprintLevel - 脚印约束水平 ("none", "moderate", "severe")
+            %
+            %   输出:
+            %     inst - NetworkInstance（多终端、多OD、多走廊）
+
+            arguments
+                nT (1,1) double = 8
+                seed (1,1) double = 42
+                demandLevel (1,1) string = "medium"
+                footprintLevel (1,1) string = "moderate"
+            end
+
+            rng(seed);
+
+            % === 终端位置（随机二维平面） ===
+            posX = rand(nT, 1) * 20;  % 0-20 nm
+            posY = rand(nT, 1) * 20;
+
+            terminalIds = arrayfun(@(i) sprintf("T%d", i), (1:nT)', 'UniformOutput', false);
+            terminalIds = [terminalIds{:}]';
+
+            % === 走廊生成（距离 < 阈值的终端对） ===
+            distThreshold = 15;  % nm
+            corridors = uam.core.CandidateCorridor.empty;
+            corrIdx = 0;
+            for i = 1:nT
+                for j = i+1:nT
+                    d = sqrt((posX(i)-posX(j))^2 + (posY(i)-posY(j))^2);
+                    if d > distThreshold, continue; end
+
+                    corrIdx = corrIdx + 1;
+                    cid = sprintf("E%d", corrIdx);
+                    % 成本正比于距离 + 小随机扰动
+                    cost = d * (0.8 + 0.4 * rand());
+                    cap = 20 + randi(30);  % 20-50 ops/hour
+
+                    % 方向标签
+                    angle = atan2d(posY(j)-posY(i), posX(j)-posX(i));
+                    if angle < 0, angle = angle + 360; end
+                    if angle < 45 || angle >= 315
+                        region = "east";
+                    elseif angle < 135
+                        region = "north";
+                    elseif angle < 225
+                        region = "west";
+                    else
+                        region = "south";
+                    end
+
+                    corridors(end+1) = uam.core.CandidateCorridor(cid, ...
+                        terminalIds(i), terminalIds(j), cost, ...
+                        'region', region, 'capacity', cap, ...
+                        'activationCost', d * 0.5); %#ok<AGROW>
+                end
+            end
+
+            % === 需求场景（多 OD 对） ===
+            switch demandLevel
+                case "low",    baseDemand = 3;
+                case "medium", baseDemand = 8;
+                case "high",   baseDemand = 15;
+                otherwise,     baseDemand = 8;
+            end
+
+            od = containers.Map();
+            for i = 1:nT
+                for j = 1:nT
+                    if i == j, continue; end
+                    if rand() < 0.4  % 40% 的 OD 对有需求
+                        key = char(terminalIds(i) + "-" + terminalIds(j));
+                        demand = baseDemand * (0.5 + rand());
+                        od(key) = demand;
+                    end
+                end
+            end
+            scenarios = uam.core.DemandScenario("w1", od, 1.0);
+
+            % === 终端样式分配 ===
+            styleOptions = containers.Map();
+            for t = 1:nT
+                tid = char(terminalIds(t));
+
+                % 收集该终端关联的走廊 ID
+                connCorridors = string.empty;
+                for e = 1:numel(corridors)
+                    if corridors(e).origin == terminalIds(t) || ...
+                       corridors(e).destination == terminalIds(t)
+                        connCorridors(end+1) = corridors(e).id; %#ok<AGROW>
+                    end
+                end
+
+                if isempty(connCorridors)
+                    connCorridors = "dummy";
+                end
+
+                % 根据 footprintLevel 决定是否有脚印阻塞
+                nConn = numel(connCorridors);
+                switch footprintLevel
+                    case "none"
+                        blocked = string.empty;
+                        ringR = 0.3;
+                    case "moderate"
+                        % 30% 终端有脚印阻塞（阻塞 1 条走廊）
+                        if rand() < 0.3 && nConn > 1
+                            blocked = connCorridors(randi(nConn));
+                            ringR = 1.0;
+                        else
+                            blocked = string.empty;
+                            ringR = 0.3;
+                        end
+                    case "severe"
+                        % 60% 终端有脚印阻塞（阻塞 1-2 条走廊）
+                        if rand() < 0.6 && nConn > 1
+                            nBlock = min(2, nConn - 1);
+                            idx = randperm(nConn, nBlock);
+                            blocked = connCorridors(idx);
+                            ringR = 1.5;
+                        else
+                            blocked = string.empty;
+                            ringR = 0.3;
+                        end
+                    otherwise
+                        blocked = string.empty;
+                        ringR = 0.3;
+                end
+
+                % 接口方向：随机分配 direct/detour
+                nH = numel(connCorridors);
+                dirs = repmat("direct", nH, 1);
+                if nH >= 2
+                    % 随机选一些接口为 detour（延误高）
+                    nDetour = max(1, round(nH * 0.3));
+                    detourIdx = randperm(nH, nDetour);
+                    dirs(detourIdx) = "detour";
+                end
+
+                % 边际外部性系数
+                mec = rand(nH, 1) * 0.5;  % 0-0.5
+                baseExt = rand() * 2;      % 0-2
+
+                padCount = 2 + randi(2);   % 2-4
+                style = uam.core.TerminalStyleConfig(sprintf("style_T%d", t), ...
+                    'feasibleCorridors', connCorridors, ...
+                    'padCount', padCount, ...
+                    'waitingSlots', padCount * 2, ...
+                    'serviceTime', 90 + randi(60), ...  % 90-150 秒
+                    'ringRadiusNm', ringR, ...
+                    'approachLengthNm', 0.5 + rand(), ...
+                    'footprintBlock', blocked, ...
+                    'noiseIndex', 0.5 + rand(), ...
+                    'populationExposure', randi(50), ...
+                    'interfaceDirections', dirs, ...
+                    'marginalExtCoeff', mec, ...
+                    'baseExternality', baseExt);
+
+                styleOptions(tid) = style;
+            end
+
+            inst = uam.core.NetworkInstance(terminalIds, corridors, ...
+                scenarios, styleOptions, 100);
+        end
     end
 end

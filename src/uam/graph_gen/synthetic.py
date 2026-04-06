@@ -1,11 +1,8 @@
-"""Synthetic candidate graph generators: G1 (sparse), G2 (dense), G3 (airport-adjacent).
+"""Synthetic candidate graph generators with port-aligned terminal creation.
 
-Generation procedure:
-1. Place terminals and waypoints on a unit square
-2. Build MST for backbone connectivity
-3. Add shortest non-crossing edges up to target density
-4. For each terminal port, create connectors to incident backbone edges
-5. Compute admissibility from truth access model
+Key design: terminals are created AFTER backbone edges, so port directions
+can be aligned to actual incident edge directions. This ensures every terminal
+has at least one admissible connector.
 """
 
 from __future__ import annotations
@@ -24,96 +21,26 @@ from uam.truth.access import build_full_admissibility
 
 @dataclass
 class GraphSpec:
-    """Specification for a graph family."""
     n_terminals: int
     n_waypoints: int
-    target_edges: tuple[int, int]  # (min, max) backbone edges
+    target_edges: tuple[int, int]
     has_airport_zone: bool = False
     airport_zone_center: tuple[float, float] = (0.5, 0.5)
     airport_zone_radius: float = 0.15
 
 
-# Predefined graph families
 G1_SPEC = GraphSpec(n_terminals=8, n_waypoints=6, target_edges=(18, 22))
 G2_SPEC = GraphSpec(n_terminals=10, n_waypoints=8, target_edges=(26, 32))
 G3_SPEC = GraphSpec(
     n_terminals=6, n_waypoints=6, target_edges=(18, 25),
     has_airport_zone=True, airport_zone_center=(0.8, 0.5), airport_zone_radius=0.15,
 )
-
-
-def generate_terminal_config(
-    tid: str,
-    x: float, y: float,
-    n_ports: int,
-    seed: int,
-    spec: GraphSpec,
-    *,
-    access_restrictiveness: float = 0.25,
-    service_asymmetry: float = 1.0,
-    footprint_severity: float = 0.0,
-) -> TerminalConfig:
-    """Generate a parameterized terminal configuration.
-
-    Args:
-        access_restrictiveness: α_A ∈ [0, 0.5]. Higher = narrower sectors.
-        service_asymmetry: κ_S ∈ [1, 3]. Ratio of max/min port service cost.
-        footprint_severity: φ_F ∈ [0, 0.5]. Fraction of neighborhood edges with penalty.
-    """
-    rng = random.Random(seed)
-
-    # Port directions: spread evenly around the circle
-    base_angle = rng.uniform(0, 360)
-    ports = []
-    for i in range(n_ports):
-        direction = (base_angle + i * 360 / n_ports) % 360
-        # Sector width decreases with access_restrictiveness
-        sector_hw = max(15, 50 - 70 * access_restrictiveness)
-
-        # Service asymmetry: first port is cheap, others get progressively expensive
-        ratio = 1.0 + (service_asymmetry - 1.0) * i / max(n_ports - 1, 1)
-        a = 0.1 + rng.uniform(0, 0.1)
-        b = (0.2 + rng.uniform(0, 0.2)) * ratio
-
-        ports.append(PortConfig(
-            port_id=f"h{i+1}",
-            direction_deg=direction,
-            sector_half_width_deg=sector_hw,
-            a=a,
-            b=b,
-        ))
-
-    # Cross-port coupling (only between adjacent ports)
-    coupling = {}
-    for i in range(n_ports):
-        for j in range(i + 1, n_ports):
-            coupling[(f"h{i+1}", f"h{j+1}")] = rng.uniform(0.05, 0.2)
-
-    # Context type
-    context = "open-city"
-    if spec.has_airport_zone:
-        dist_to_airport = math.hypot(x - spec.airport_zone_center[0], y - spec.airport_zone_center[1])
-        if dist_to_airport < spec.airport_zone_radius * 2:
-            context = "airport-adjacent"
-
-    # Organization
-    org = rng.choice(["direct", "single-ring", "multi-ring"])
-    proc = rng.choice(["procedure-like", "path-like"])
-
-    return TerminalConfig(
-        terminal_id=tid,
-        x=x, y=y,
-        ports=ports,
-        pads=rng.randint(1, 3),
-        gates=rng.choice([0, 2, 4]),
-        organization=org,
-        procedure_type=proc,
-        context_type=context,
-        mu_bar=3.0 + rng.uniform(0, 3),
-        psi_sat=rng.uniform(1, 5),
-        cross_port_coupling=coupling,
-        footprint_radius_hops=1,
-    )
+G1_SMALL = GraphSpec(n_terminals=4, n_waypoints=3, target_edges=(8, 10))
+G2_SMALL = GraphSpec(n_terminals=5, n_waypoints=4, target_edges=(10, 14))
+G3_SMALL = GraphSpec(
+    n_terminals=3, n_waypoints=3, target_edges=(7, 10),
+    has_airport_zone=True, airport_zone_center=(0.8, 0.5), airport_zone_radius=0.15,
+)
 
 
 def generate_synthetic_graph(
@@ -125,130 +52,165 @@ def generate_synthetic_graph(
     service_asymmetry: float = 1.0,
     footprint_severity: float = 0.0,
 ) -> PortAugmentedGraph:
-    """Generate a complete port-augmented graph from a family specification.
-
-    Returns:
-        PortAugmentedGraph with terminals, waypoints, backbone, connectors, admissibility.
-    """
     rng = random.Random(seed)
     np_rng = np.random.RandomState(seed)
 
-    # --- Place nodes ---
-    all_positions = {}
-    terminals = {}
-
+    # --- 1. Place nodes ---
+    positions: dict[str, tuple[float, float]] = {}
+    terminal_ids = []
     for i in range(spec.n_terminals):
         tid = f"T{i+1}"
-        x, y = np_rng.uniform(0.05, 0.95, 2)
-        n_ports = rng.choice([1, 2, 3])
-        t = generate_terminal_config(
-            tid, x, y, n_ports, seed + i * 100, spec,
-            access_restrictiveness=access_restrictiveness,
-            service_asymmetry=service_asymmetry,
-            footprint_severity=footprint_severity,
-        )
-        terminals[tid] = t
-        all_positions[tid] = (x, y)
+        positions[tid] = tuple(np_rng.uniform(0.05, 0.95, 2))
+        terminal_ids.append(tid)
 
-    waypoints = {}
+    waypoints: dict[str, tuple[float, float]] = {}
     for i in range(spec.n_waypoints):
         wid = f"W{i+1}"
-        x, y = np_rng.uniform(0.05, 0.95, 2)
-        waypoints[wid] = (x, y)
-        all_positions[wid] = (x, y)
+        pos = tuple(np_rng.uniform(0.05, 0.95, 2))
+        positions[wid] = pos
+        waypoints[wid] = pos
 
-    # --- Build backbone edges ---
-    node_ids = list(all_positions.keys())
-    n_nodes = len(node_ids)
-
-    # Compute all pairwise distances
-    dist_matrix = {}
+    # --- 2. Build backbone edges (MST + extra) ---
+    node_ids = list(positions.keys())
+    dist_pairs = []
     for i, u in enumerate(node_ids):
         for j, v in enumerate(node_ids):
             if i < j:
-                d = math.hypot(
-                    all_positions[u][0] - all_positions[v][0],
-                    all_positions[u][1] - all_positions[v][1],
-                )
-                dist_matrix[(u, v)] = d
+                d = math.hypot(positions[u][0] - positions[v][0],
+                               positions[u][1] - positions[v][1])
+                dist_pairs.append((d, u, v))
 
-    # MST for connectivity
     g = nx.Graph()
-    for (u, v), d in dist_matrix.items():
+    for d, u, v in dist_pairs:
         g.add_edge(u, v, weight=d)
     mst = nx.minimum_spanning_tree(g)
 
-    backbone = {}
-    edge_idx = 0
+    backbone: dict[str, BackboneEdge] = {}
+    eidx = 0
     for u, v, data in mst.edges(data=True):
-        edge_idx += 1
-        eid = f"E{edge_idx}"
+        eidx += 1
         d = data["weight"]
-        backbone[eid] = BackboneEdge(
-            edge_id=eid, u=u, v=v,
-            length=d,
+        backbone[f"E{eidx}"] = BackboneEdge(
+            f"E{eidx}", u, v, d,
             construction_cost=d * (0.8 + rng.random() * 0.4),
             travel_cost=d * (0.5 + rng.random() * 0.5),
             capacity=20 + rng.randint(0, 30),
         )
 
-    # Add more edges up to target density
-    remaining = sorted(
-        [(d, u, v) for (u, v), d in dist_matrix.items() if not mst.has_edge(u, v)],
-    )
+    remaining = sorted([(d, u, v) for d, u, v in dist_pairs if not mst.has_edge(u, v)])
     target = rng.randint(*spec.target_edges)
     for d, u, v in remaining:
         if len(backbone) >= target:
             break
-        edge_idx += 1
-        eid = f"E{edge_idx}"
-        backbone[eid] = BackboneEdge(
-            edge_id=eid, u=u, v=v,
-            length=d,
+        eidx += 1
+        backbone[f"E{eidx}"] = BackboneEdge(
+            f"E{eidx}", u, v, d,
             construction_cost=d * (0.8 + rng.random() * 0.4),
             travel_cost=d * (0.5 + rng.random() * 0.5),
             capacity=20 + rng.randint(0, 30),
         )
 
-    base_graph = CandidateGraph(
-        terminals=terminals,
-        waypoints=waypoints,
-        backbone_edges=backbone,
-    )
+    # --- 3. Create terminals with port directions aligned to incident edges ---
+    terminals: dict[str, TerminalConfig] = {}
+    for tid in terminal_ids:
+        tx, ty = positions[tid]
 
-    # --- Footprint: assign penalties based on severity ---
+        # Find incident edge directions
+        incident_dirs = []
+        for eid, edge in backbone.items():
+            if edge.u == tid or edge.v == tid:
+                other = edge.v if edge.u == tid else edge.u
+                ox, oy = positions[other]
+                angle = math.degrees(math.atan2(oy - ty, ox - tx)) % 360
+                incident_dirs.append((angle, eid))
+
+        # Create ports: cluster incident edges into port groups
+        n_incident = len(incident_dirs)
+        if n_incident == 0:
+            n_ports = 1
+        else:
+            n_ports = min(rng.choice([1, 2, 3]), n_incident)
+
+        # Sort by direction, then assign to ports round-robin
+        incident_dirs.sort()
+
+        # Port directions: if we have n_ports, place them at the centroid of their assigned edges
+        sector_hw = max(15, 50 - 70 * access_restrictiveness)
+
+        if n_incident == 0:
+            port_dirs = [rng.uniform(0, 360)]
+        elif n_ports == 1:
+            # Single port covers all directions — use wide sector
+            port_dirs = [incident_dirs[len(incident_dirs) // 2][0]]
+            sector_hw = max(sector_hw, 180 / max(n_incident, 1) + 30)
+        else:
+            # Spread ports evenly, but center each on its assigned edges
+            edges_per_port = [[] for _ in range(n_ports)]
+            for idx, (angle, eid) in enumerate(incident_dirs):
+                edges_per_port[idx % n_ports].append(angle)
+            port_dirs = []
+            for angles in edges_per_port:
+                if angles:
+                    # Circular mean
+                    mean_sin = sum(math.sin(math.radians(a)) for a in angles) / len(angles)
+                    mean_cos = sum(math.cos(math.radians(a)) for a in angles) / len(angles)
+                    port_dirs.append(math.degrees(math.atan2(mean_sin, mean_cos)) % 360)
+                else:
+                    port_dirs.append(rng.uniform(0, 360))
+
+        ports = []
+        for i, pdir in enumerate(port_dirs):
+            ratio = 1.0 + (service_asymmetry - 1.0) * i / max(len(port_dirs) - 1, 1)
+            a = 0.1 + rng.uniform(0, 0.1)
+            b = (0.2 + rng.uniform(0, 0.2)) * ratio
+            ports.append(PortConfig(f"h{i+1}", pdir, sector_hw, a, b))
+
+        coupling = {}
+        for i in range(len(ports)):
+            for j in range(i + 1, len(ports)):
+                coupling[(f"h{i+1}", f"h{j+1}")] = rng.uniform(0.05, 0.2)
+
+        context = "open-city"
+        if spec.has_airport_zone:
+            dist_ap = math.hypot(tx - spec.airport_zone_center[0], ty - spec.airport_zone_center[1])
+            if dist_ap < spec.airport_zone_radius * 2:
+                context = "airport-adjacent"
+
+        terminals[tid] = TerminalConfig(
+            terminal_id=tid, x=tx, y=ty,
+            ports=ports, pads=rng.randint(1, 3), gates=rng.choice([0, 2, 4]),
+            organization=rng.choice(["direct", "single-ring", "multi-ring"]),
+            procedure_type=rng.choice(["procedure-like", "path-like"]),
+            context_type=context,
+            mu_bar=3.0 + rng.uniform(0, 3), psi_sat=rng.uniform(1, 5),
+            cross_port_coupling=coupling, footprint_radius_hops=1,
+        )
+
+    base = CandidateGraph(terminals=terminals, waypoints=waypoints, backbone_edges=backbone)
+
+    # --- 4. Footprint ---
     for tid, terminal in terminals.items():
-        neighborhood = base_graph.neighborhood_edges(tid, 1)
+        neighborhood = base.neighborhood_edges(tid, 1)
         n_penalized = int(len(neighborhood) * footprint_severity)
         if n_penalized > 0:
             penalized = rng.sample(neighborhood, min(n_penalized, len(neighborhood)))
             for eid in penalized:
                 terminal.footprint_base_penalty[eid] = rng.uniform(0.5, 2.0)
-            # Block some edges (half of penalized, rounded down)
-            n_blocked = max(0, n_penalized // 2)
-            for eid in penalized[:n_blocked]:
+            for eid in penalized[: max(0, n_penalized // 2)]:
                 terminal.blocked_edges.add(eid)
 
-    # --- Build connectors and admissibility ---
-    admissibility = build_full_admissibility(base_graph)
+    # --- 5. Admissibility + connectors ---
+    admissibility = build_full_admissibility(base)
+    connectors: dict[str, ConnectorArc] = {}
+    cidx = 0
+    for (tid, pid, eid), ok in admissibility.items():
+        if ok:
+            cidx += 1
+            cid = f"C{cidx}"
+            d = base.compute_edge_direction(base.backbone_edges[eid], tid)
+            connectors[cid] = ConnectorArc(cid, eid, tid, pid, d, 0.05 + rng.random() * 0.05)
 
-    connectors = {}
-    conn_idx = 0
-    for (tid, pid, eid), is_adm in admissibility.items():
-        if is_adm:
-            conn_idx += 1
-            cid = f"C{conn_idx}"
-            direction = base_graph.compute_edge_direction(base_graph.backbone_edges[eid], tid)
-            connectors[cid] = ConnectorArc(
-                cid, eid, tid, pid, direction,
-                travel_cost=0.05 + rng.random() * 0.05,
-            )
-
-    return PortAugmentedGraph(
-        base=base_graph,
-        connectors=connectors,
-        admissibility=admissibility,
-    )
+    return PortAugmentedGraph(base=base, connectors=connectors, admissibility=admissibility)
 
 
 def generate_demand(
@@ -257,18 +219,7 @@ def generate_demand(
     seed: int = 42,
     coverage: float = 0.4,
 ) -> list:
-    """Generate demand scenarios for a graph.
-
-    Args:
-        intensity: ρ multiplier on base demand.
-        seed: Random seed.
-        coverage: Fraction of OD pairs with demand.
-
-    Returns:
-        List with one DemandScenario.
-    """
     from uam.core.demand import DemandScenario
-
     rng = random.Random(seed)
     tids = list(graph.terminals.keys())
     od = {}
@@ -277,12 +228,5 @@ def generate_demand(
             if src == dst:
                 continue
             if rng.random() < coverage:
-                base = 1.0 + rng.random() * 2.0
-                od[(src, dst)] = base * intensity
-
-    return [DemandScenario(
-        scenario_id="w1",
-        od_demand=od,
-        probability=1.0,
-        unmet_penalty=100.0,
-    )]
+                od[(src, dst)] = (1.0 + rng.random() * 2.0) * intensity
+    return [DemandScenario(scenario_id="w1", od_demand=od, probability=1.0, unmet_penalty=100.0)]

@@ -52,8 +52,12 @@ def build_and_solve(
     model.setParam("MIPGap", params.mip_gap)
     if params.threads > 0:
         model.setParam("Threads", params.threads)
-    # Allow non-convex MIQP for bilinear terms (M* footprint load-sensitivity)
-    model.setParam("NonConvex", 2)
+    # NonConvex=2 only needed when bilinear terms exist (M* footprint load-sensitivity × x)
+    # Gurobi restricted license may reject some non-convex models
+    has_bilinear = (level == ModelLevel.MSTAR and
+                    any(t.footprint_load_sensitivity for t in graph.terminals.values()))
+    if has_bilinear:
+        model.setParam("NonConvex", 2)
 
     edges = graph.backbone_edges
     connectors = graph.connectors
