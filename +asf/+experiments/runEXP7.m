@@ -68,7 +68,7 @@ function runEXP7(outDir)
         completed = false(total, 1);
     end
 
-    opts = struct('nPwl', 15, 'verbose', false, 'truthLevel', 'JO');
+    opts = struct('nPwl', 15, 'verbose', false);
 
     for idx = 1:total
         if completed(idx), continue; end
@@ -104,11 +104,14 @@ function runEXP7(outDir)
 
             allLevels = ["B0";"B1";"M1";"M2"];
             res = asf.solver.computeRegret(inst, allLevels, ifaces, opts);
-            elapsed = toc(t0);
 
-            % JO 的 truth objective 就是 J*
-            jJO = res.star.jTruth;
-            joTime = res.star.solveTime;
+            % === 独立求解 JO 并 truth evaluate, 确保 jJO 是真正的 JO 值 ===
+            tJO0 = tic;
+            joDesign = asf.solver.solveMILP(inst, "JO", containers.Map(), opts);
+            joTime = toc(tJO0);
+            [jJO, ~] = asf.solver.truthEvaluate(joDesign, inst);
+
+            elapsed = toc(t0);
 
             r = struct();
             r.family = fname; r.seed = sd; r.rho = rho;

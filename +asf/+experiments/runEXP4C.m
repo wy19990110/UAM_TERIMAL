@@ -28,7 +28,7 @@ function runEXP4C(outDir)
     alphaA = 0.25;
     kappaS = 2;
     rhoVals = [0.5, 0.8, 1.0, 1.2, 1.5];
-    phiFVals = [0, 0.1, 0.2, 0.3, 0.5, 0.7];
+    phiFVals = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.7];
 
     % Audit 精度等级
     auditNPwl = [7, 15, 31];

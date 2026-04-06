@@ -318,21 +318,41 @@ function inst = buildSynthetic(spec, seed, params)
     if concentration > 0
         concentrateOn = tids(randi(nT));
     end
+    % 两遍生成: 先算 base demand, 再乘 concentration 权重并归一化保总量不变
+    odKeys = {};
+    odBase = [];
+    odWeights = [];
     for i = 1:nT
         for j = 1:nT
             if i == j, continue; end
             if rand < 0.4
-                baseDemand = (1+rand*2) * params.rho;
+                odKeys{end+1} = char(tids(i) + "-" + tids(j)); %#ok<AGROW>
+                odBase(end+1) = (1+rand*2) * params.rho; %#ok<AGROW>
+                % concentration 权重
                 if concentration > 0 && concentrateOn ~= ""
                     if tids(j) == concentrateOn || tids(i) == concentrateOn
-                        baseDemand = baseDemand * (1 + concentration * 2);
+                        odWeights(end+1) = 1 + concentration * 2; %#ok<AGROW>
                     else
-                        baseDemand = baseDemand * max(0.3, 1 - concentration * 0.5);
+                        odWeights(end+1) = max(0.3, 1 - concentration * 0.5); %#ok<AGROW>
                     end
+                else
+                    odWeights(end+1) = 1; %#ok<AGROW>
                 end
-                key = char(tids(i) + "-" + tids(j));
-                inst.odDemand(key) = baseDemand;
             end
+        end
+    end
+    % 归一化: 保持 Σ(demand) 不变
+    if ~isempty(odBase)
+        rawTotal = sum(odBase);
+        weighted = odBase .* odWeights;
+        weightedTotal = sum(weighted);
+        if weightedTotal > 1e-10
+            scale = rawTotal / weightedTotal;
+        else
+            scale = 1;
+        end
+        for k = 1:numel(odKeys)
+            inst.odDemand(odKeys{k}) = weighted(k) * scale;
         end
     end
 end

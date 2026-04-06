@@ -85,10 +85,19 @@ function runEXP8(outDir)
                 tJO = tic;
                 joDesign = asf.solver.solveMILP(inst, "JO", containers.Map(), opts);
                 joTime = toc(tJO);
+                joTimedOut = joDesign.objective == Inf;
+                r.joTimedOut = joTimedOut;
+                r.joTime = joTime;
+                if joTimedOut
+                    jJO = Inf;
+                    r.joTruthObj = Inf;
+                    logmsg('  JO 求解失败/超时, 跳过该实例');
+                    r.error = "JO_timeout";
+                    results{end+1} = r; %#ok<AGROW>
+                    continue;
+                end
                 [jJO, ~] = asf.solver.truthEvaluate(joDesign, inst);
                 r.joTruthObj = jJO;
-                r.joTime = joTime;
-                r.joTimedOut = joDesign.objective == Inf;
 
                 % 各模型独立求解
                 ifacesMap = containers.Map();
@@ -107,12 +116,19 @@ function runEXP8(outDir)
                     try
                         design = asf.solver.solveMILP(inst, lv, lvIfaces, opts);
                         lvTime = toc(tLv);
-                        [jTruth, ~] = asf.solver.truthEvaluate(design, inst);
-                        r.(tag).truthObj = jTruth;
-                        r.(tag).gapToJO = jTruth - jJO;
-                        r.(tag).gapPct = (jTruth - jJO) / max(abs(jJO), 1e-10);
+                        lvTimedOut = design.objective == Inf;
                         r.(tag).time = lvTime;
-                        r.(tag).timedOut = design.objective == Inf;
+                        r.(tag).timedOut = lvTimedOut;
+                        if lvTimedOut
+                            r.(tag).truthObj = Inf;
+                            r.(tag).gapToJO = Inf;
+                            r.(tag).gapPct = Inf;
+                        else
+                            [jTruth, ~] = asf.solver.truthEvaluate(design, inst);
+                            r.(tag).truthObj = jTruth;
+                            r.(tag).gapToJO = jTruth - jJO;
+                            r.(tag).gapPct = (jTruth - jJO) / max(abs(jJO), 1e-10);
+                        end
                     catch ME2
                         r.(tag).error = ME2.message;
                         r.(tag).time = toc(tLv);
