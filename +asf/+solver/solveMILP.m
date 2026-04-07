@@ -429,9 +429,16 @@ function design = solveMILP(inst, level, ifaces, opts)
         optns = optimoptions('intlinprog', 'Display', 'final');
     end
 
-    [sol, fval, exitflag] = intlinprog(fObj, intcon, Aineq, bineq, Aeq, beq, lb, ub, optns);
+    [sol, fval, exitflag, output] = intlinprog(fObj, intcon, Aineq, bineq, Aeq, beq, lb, ub, optns);
 
     design = asf.core.NetworkDesign();
+    % 保存求解状态 (二轮修改: JO quality gate 需要)
+    design.solveStatus = exitflag;
+    if isfield(output, 'relativegap')
+        design.mipGap = output.relativegap;
+    else
+        design.mipGap = NaN;
+    end
     if exitflag <= 0, return; end
 
     design.objective = fval;

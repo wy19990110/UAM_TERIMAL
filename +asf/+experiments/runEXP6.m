@@ -1,9 +1,9 @@
 function runEXP6(outDir)
-    % runEXP6 向下比 incumbent abstractions
-    %   按新的实验要求 §二.8:
-    %   比较 B0/B1/M0/M1(=O1)/M2(=O2)/PR，共用同一 candidate graph + truth re-evaluation
-    %   核心指标: truth regret, topology distance, recovery rate, runtime
-    %   回答: "我们的抽象比现有抽象到底好多少"
+    % runEXP6  向下比 incumbent abstractions (二轮修改: 分层报告)
+    %   模型: B0 / B1 / M1 / M2N / JO (去掉 PR, 等 4D 修好再回来)
+    %   指标: median truth excess cost, P90, sufficiency rate (<3%, <5%)
+    %   展示方式按 regime 分层:
+    %     phiF=0, 0<phiF<0.4, phiF>=0.4, E_A>=0.7 子样本
     arguments
         outDir (1,1) string = "results/exp6"
     end
@@ -15,18 +15,6 @@ function runEXP6(outDir)
 
     flog = fopen(logFile, 'a');
     logmsg = @(m) fprintf(flog, '[%s] %s\n', datestr(now,'HH:MM:SS'), m);
-
-    % 加载 calibrated rule (from EXP-4D)
-    ruleFile = fullfile('results', 'exp4d', 'calibrated_rule.mat');
-    if exist(ruleFile, 'file')
-        rl = load(ruleFile);
-        rule = rl.calibratedRule;
-        logmsg(sprintf('加载 rule: E_A>=%.2f→M1, E_S>=%.2f→M1, E_F>=%.2f→M2', ...
-            rule.eaThresh, rule.esThresh, rule.efThresh));
-    else
-        logmsg('未找到 calibrated_rule.mat, 使用默认规则');
-        rule = struct('eaThresh', 0.3, 'esThresh', 0.5, 'efThresh', 0.2);
-    end
 
     families = struct('name',{'G1s','G2s','G3s'}, ...
         'spec',{struct('nT',4,'nW',3,'targetEdges',[7,9]), ...
@@ -50,13 +38,18 @@ function runEXP6(outDir)
         end
     end
     total = numel(combos);
-    logmsg(sprintf('=== EXP-6 Incumbent Benchmark: %d 实例 ===', total));
+    logmsg(sprintf('=== EXP-6 Incumbent Benchmark (二轮): %d 实例 ===', total));
 
     if exist(cpFile, 'file')
         cp = load(cpFile);
-        results = cp.results;
-        completed = cp.completed;
-        logmsg(sprintf('加载 checkpoint: %d/%d', sum(completed), total));
+        if numel(cp.completed) == total
+            results = cp.results;
+            completed = cp.completed;
+            logmsg(sprintf('加载 checkpoint: %d/%d', sum(completed), total));
+        else
+            results = cell(total, 1);
+            completed = false(total, 1);
+        end
     else
         results = cell(total, 1);
         completed = false(total, 1);
@@ -79,9 +72,9 @@ function runEXP6(outDir)
             params = struct('alphaA', aA, 'kappaS', 2, 'phiF', pF, 'rho', rho);
             inst = asf.graphgen.buildSynthetic(spec, sd, params);
 
-            % 提取所有接口
+            % 提取所有接口 (二轮: M2N 代替 M2)
             b0i = containers.Map(); b1i = containers.Map();
-            m0i = containers.Map(); m1i = containers.Map(); m2i = containers.Map();
+            m0i = containers.Map(); m1i = containers.Map(); m2ni = containers.Map();
             tkeys = inst.terminals.keys;
             for ti = 1:numel(tkeys)
                 t = inst.terminals(tkeys{ti});
@@ -89,11 +82,11 @@ function runEXP6(outDir)
                 b1i(tkeys{ti}) = asf.interface.extractB1(t, inst);
                 m0i(tkeys{ti}) = asf.interface.extractM0(t);
                 m1i(tkeys{ti}) = asf.interface.extractM1(t, inst);
-                m2i(tkeys{ti}) = asf.interface.extractM2(t, inst);
+                m2ni(tkeys{ti}) = asf.interface.extractM2N(t, inst);
             end
             ifaces = containers.Map();
             ifaces('B0') = b0i; ifaces('B1') = b1i;
-            ifaces('M0') = m0i; ifaces('M1') = m1i; ifaces('M2') = m2i;
+            ifaces('M0') = m0i; ifaces('M1') = m1i; ifaces('M2') = m2ni;
 
             allLevels = ["B0";"B1";"M0";"M1";"M2"];
             res = asf.solver.computeRegret(inst, allLevels, ifaces, opts);
@@ -104,9 +97,11 @@ function runEXP6(outDir)
             r.alphaA = aA; r.phiF = pF;
             r.jStar = res.star.jTruth;
             r.time = elapsed; r.error = "";
+            r.E_A = inst.excitation.E_A; r.E_S = inst.excitation.E_S; r.E_F = inst.excitation.E_F;
 
             for lv = allLevels'
                 tag = char(lv);
+                % M2 在结果中实际是 M2N
                 lr = res.(tag);
                 r.(tag).regret = lr.regret;
                 r.(tag).relRegret = lr.relRegret;
@@ -114,28 +109,14 @@ function runEXP6(outDir)
                 r.(tag).recoveryRate = lr.recoveryRate;
                 r.(tag).jTruth = lr.jTruth;
                 r.(tag).solveTime = lr.solveTime;
+                % truth excess cost (绝对值)
+                r.(tag).excessCost = lr.regret;
             end
 
-            % PR: 用 rule 选择模型
-            E_A = inst.excitation.E_A;
-            E_S = inst.excitation.E_S;
-            E_F = inst.excitation.E_F;
-            r.E_A = E_A; r.E_S = E_S; r.E_F = E_F;
-            prRec = applyRule(E_A, E_S, E_F, rule.eaThresh, rule.esThresh, rule.efThresh);
-            r.prRecommendation = char(prRec);
-            prData = res.(char(prRec));
-            r.PR.jTruth = prData.jTruth;
-            r.PR.regret = prData.regret;
-            r.PR.relRegret = prData.relRegret;
-            r.PR.tdBB = prData.tdBB;
-            r.PR.recoveryRate = prData.recoveryRate;
-            r.PR.solveTime = prData.solveTime;
-
             results{idx} = r;
-            logmsg(sprintf('  B0=%.1f%% B1=%.1f%% M1=%.1f%% M2=%.1f%% PR(%s)=%.1f%% (%.1fs)', ...
+            logmsg(sprintf('  B0=%.1f%% B1=%.1f%% M1=%.1f%% M2N=%.1f%% (%.1fs)', ...
                 res.B0.relRegret*100, res.B1.relRegret*100, ...
-                res.M1.relRegret*100, res.M2.relRegret*100, ...
-                r.prRecommendation, r.PR.relRegret*100, elapsed));
+                res.M1.relRegret*100, res.M2.relRegret*100, elapsed));
         catch ME
             elapsed = toc(t0);
             r = struct(); r.family = fname; r.seed = sd; r.rho = rho;
@@ -149,35 +130,64 @@ function runEXP6(outDir)
     end
 
     save(resultFile, 'results', 'combos');
-    logmsg('=== EXP-6 完成 ===');
-    fclose(flog);
+    logmsg('=== EXP-6 数据收集完成 ===');
 
-    % 控制台汇总
-    fprintf('\n=== EXP-6 Incumbent Benchmark 汇总 ===\n');
-    nValid = 0; sums = struct('B0',0,'B1',0,'M0',0,'M1',0,'M2',0,'PR',0);
+    % === 分层汇总 ===
+    modelTags = ["B0","B1","M0","M1","M2"];
+    modelLabels = ["B0","B1","M0","M1","M2N"];
+
+    % 收集有效结果
+    validResults = {};
     for idx = 1:total
         r = results{idx};
-        if isempty(r) || (~isempty(r.error) && r.error ~= ""), continue; end
-        nValid = nValid + 1;
-        for lv = ["B0","B1","M0","M1","M2","PR"]
-            sums.(char(lv)) = sums.(char(lv)) + abs(r.(char(lv)).relRegret);
+        if ~isempty(r) && (isempty(r.error) || r.error == "")
+            validResults{end+1} = r; %#ok<AGROW>
         end
     end
-    if nValid > 0
-        fprintf('平均 |relative regret| (%d 实例):\n', nValid);
-        for lv = ["B0","B1","M0","M1","M2","PR"]
-            fprintf('  %s: %.2f%%\n', lv, sums.(char(lv))/nValid*100);
+
+    % 定义 regime 切片
+    regimes = struct('name', {}, 'filter', {});
+    regimes(1) = struct('name', 'phiF=0', 'filter', @(r) abs(r.phiF) < 1e-6);
+    regimes(2) = struct('name', '0<phiF<0.4', 'filter', @(r) r.phiF > 1e-6 && r.phiF < 0.4);
+    regimes(3) = struct('name', 'phiF>=0.4', 'filter', @(r) r.phiF >= 0.4);
+    regimes(4) = struct('name', 'E_A>=0.7', 'filter', @(r) r.E_A >= 0.7);
+
+    fprintf('\n=== EXP-6 Regime-Stratified Results ===\n');
+    for ri = 1:numel(regimes)
+        regime = regimes(ri);
+        subset = {};
+        for vi = 1:numel(validResults)
+            if regime.filter(validResults{vi})
+                subset{end+1} = validResults{vi}; %#ok<AGROW>
+            end
         end
-    end
-end
+        n = numel(subset);
+        fprintf('\n--- %s (n=%d) ---\n', regime.name, n);
+        fprintf('%-5s  %10s  %10s  %8s  %8s\n', 'Model', 'med_excess', 'P90_excess', 'suff<3%', 'suff<5%');
 
+        for mi = 1:numel(modelTags)
+            tag = char(modelTags(mi));
+            excessVals = [];
+            for si2 = 1:n
+                if isfield(subset{si2}, tag) && isfield(subset{si2}.(tag), 'relRegret')
+                    excessVals(end+1) = subset{si2}.(tag).relRegret; %#ok<AGROW>
+                end
+            end
+            if isempty(excessVals)
+                fprintf('%-5s  %10s  %10s  %8s  %8s\n', modelLabels(mi), 'N/A','N/A','N/A','N/A');
+                continue;
+            end
+            medExcess = median(excessVals);
+            p90Excess = quantile(excessVals, 0.90);
+            suff3 = mean(abs(excessVals) < 0.03);
+            suff5 = mean(abs(excessVals) < 0.05);
+            fprintf('%-5s  %9.2f%%  %9.2f%%  %7.0f%%  %7.0f%%\n', ...
+                modelLabels(mi), medExcess*100, p90Excess*100, suff3*100, suff5*100);
+        end
 
-function rec = applyRule(E_A, E_S, E_F, eaThresh, esThresh, efThresh)
-    if E_F >= efThresh
-        rec = "M2";
-    elseif E_A >= eaThresh || E_S >= esThresh
-        rec = "M1";
-    else
-        rec = "M0";
+        logmsg(sprintf('Regime %s: n=%d', regime.name, n));
     end
+
+    logmsg('=== EXP-6 完成 ===');
+    fclose(flog);
 end
