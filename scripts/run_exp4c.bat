@@ -1,2 +1,1 @@
-@echo off
-matlab -batch "cd('C:\Projects\UAM_NET'); run('startup.m'); asf.experiments.runEXP4C('results/exp4c');" > results\exp4c_console.txt 2>&1
+matlab -nosplash -nodesktop -r "cd('C:\Projects\UAM_NET'); asf.experiments.runEXP4C(); exit;" -logfile results\exp4c\matlab_console.log

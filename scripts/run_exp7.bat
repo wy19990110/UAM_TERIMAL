@@ -1,3 +1,1 @@
-@echo off
-echo === EXP-7: Integrated Upper Bound (JO) ===
-python -m uam.experiments.exp7_integrated_ub %1
+matlab -nosplash -nodesktop -r "cd('C:\\Projects\\UAM_NET'); asf.experiments.runEXP7(); exit;" -logfile results\\exp7\\matlab_console.log
