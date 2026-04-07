@@ -349,17 +349,17 @@ function design = solveMILP(inst, level, ifaces, opts)
                 fwdVar = oFwd + (ki-1)*nE + ei;
                 revVar = oRev + (ki-1)*nE + ei;
                 % fwd: nodeU → nodeV
-                if char(e.nodeV) == string(node)  % fwd inflow
+                if strcmp(char(e.nodeV), node)  % fwd inflow
                     EqRows(end+1) = eqIdx; EqCols(end+1) = fwdVar; EqVals(end+1) = 1; %#ok<AGROW>
                 end
-                if char(e.nodeU) == string(node)  % fwd outflow
+                if strcmp(char(e.nodeU), node)  % fwd outflow
                     EqRows(end+1) = eqIdx; EqCols(end+1) = fwdVar; EqVals(end+1) = -1; %#ok<AGROW>
                 end
                 % rev: nodeV → nodeU
-                if char(e.nodeU) == string(node)  % rev inflow
+                if strcmp(char(e.nodeU), node)  % rev inflow
                     EqRows(end+1) = eqIdx; EqCols(end+1) = revVar; EqVals(end+1) = 1; %#ok<AGROW>
                 end
-                if char(e.nodeV) == string(node)  % rev outflow
+                if strcmp(char(e.nodeV), node)  % rev outflow
                     EqRows(end+1) = eqIdx; EqCols(end+1) = revVar; EqVals(end+1) = -1; %#ok<AGROW>
                 end
             end
@@ -367,7 +367,7 @@ function design = solveMILP(inst, level, ifaces, opts)
             % Connector outflow from terminal backbone node
             for ci = 1:nC
                 c = inst.connectors(char(connIds(ci)));
-                if char(c.terminalId) == string(node)
+                if strcmp(char(c.terminalId), node)
                     fcVar = oFc + (ki-1)*nC + ci;
                     EqRows(end+1) = eqIdx; EqCols(end+1) = fcVar; EqVals(end+1) = -1; %#ok<AGROW>
                 end
@@ -405,7 +405,7 @@ function design = solveMILP(inst, level, ifaces, opts)
         eqIdx = eqIdx + 1;
         for ci = 1:nC
             c = inst.connectors(char(connIds(ci)));
-            if char(c.terminalId) == dst_k
+            if strcmp(char(c.terminalId), dst_k)
                 fcVar = oFc + (ki-1)*nC + ci;
                 EqRows(end+1) = eqIdx; EqCols(end+1) = fcVar; EqVals(end+1) = 1; %#ok<AGROW>
             end

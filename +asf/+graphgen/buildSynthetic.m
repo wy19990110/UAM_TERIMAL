@@ -103,8 +103,8 @@ function inst = buildSynthetic(spec, seed, params)
         for ei = 1:numel(ekeys)
             e = inst.edges(ekeys{ei});
             other = "";
-            if char(e.nodeU) == tid, other = e.nodeV; end
-            if char(e.nodeV) == tid, other = e.nodeU; end
+            if strcmp(char(e.nodeU), tid), other = e.nodeV; end
+            if strcmp(char(e.nodeV), tid), other = e.nodeU; end
             if other == "", continue; end
             op = allPos(char(other));
             angle = mod(atan2d(op(2)-tpos(2), op(1)-tpos(1)), 360);

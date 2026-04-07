@@ -79,9 +79,9 @@ classdef ProblemInstance
                 for i = 1:numel(keys)
                     e = obj.edges(keys{i});
                     neighbor = "";
-                    if char(e.nodeU) == string(node)
+                    if strcmp(char(e.nodeU), char(node))
                         neighbor = e.nodeV;
-                    elseif char(e.nodeV) == string(node)
+                    elseif strcmp(char(e.nodeV), char(node))
                         neighbor = e.nodeU;
                     end
                     if neighbor ~= ""

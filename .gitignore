@@ -8,7 +8,8 @@ slprj/
 *.slxc
 
 # 结果输出（大文件，不入库）
-results/
+results/*
+!results/reports_phase2/
 
 # Python
 __pycache__/
