@@ -50,9 +50,17 @@ function runEXP4C(outDir)
 
     if exist(cpFile, 'file')
         cp = load(cpFile);
-        results = cp.results;
-        completed = cp.completed;
-        logmsg(sprintf('加载 checkpoint: %d/%d', sum(completed), total));
+        % 检测旧 checkpoint 与当前网格是否兼容
+        if numel(cp.completed) == total
+            results = cp.results;
+            completed = cp.completed;
+            logmsg(sprintf('加载 checkpoint: %d/%d', sum(completed), total));
+        else
+            logmsg(sprintf('旧 checkpoint 大小(%d)与当前网格(%d)不兼容, 重新开始', ...
+                numel(cp.completed), total));
+            results = cell(total, 1);
+            completed = false(total, 1);
+        end
     else
         results = cell(total, 1);
         completed = false(total, 1);

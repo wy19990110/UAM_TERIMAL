@@ -109,6 +109,20 @@ function runEXP7(outDir)
             tJO0 = tic;
             joDesign = asf.solver.solveMILP(inst, "JO", containers.Map(), opts);
             joTime = toc(tJO0);
+
+            % JO 求解失败时跳过该实例
+            if joDesign.objective == Inf
+                elapsed = toc(t0);
+                r = struct(); r.family = fname; r.seed = sd; r.rho = rho;
+                r.alphaA = aA; r.phiF = pF;
+                r.error = "JO_solve_failed"; r.time = elapsed;
+                r.joSolveTime = joTime;
+                results{idx} = r;
+                logmsg(sprintf('  JO 求解失败, 跳过 (%.1fs)', elapsed));
+                completed(idx) = true;
+                save(cpFile, 'results', 'completed', 'combos');
+                continue;
+            end
             [jJO, ~] = asf.solver.truthEvaluate(joDesign, inst);
 
             elapsed = toc(t0);
@@ -126,7 +140,7 @@ function runEXP7(outDir)
                 r.(tag).jTruth = lr.jTruth;
                 r.(tag).gapToJO = lr.jTruth - jJO;
                 r.(tag).gapToJOPct = (lr.jTruth - jJO) / max(abs(jJO), 1e-10);
-                r.(tag).tdBB = lr.tdBB;
+                r.(tag).tdBB = lr.design.topologyDistBB(joDesign);  % 相对 JO 设计
                 r.(tag).solveTime = lr.solveTime;
             end
 
