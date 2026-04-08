@@ -1,15 +1,11 @@
 function runEXP7(outDir)
-    % runEXP7 向上比 integrated upper bound (JO)
-    %   按新的实验要求 §二.9:
-    %   JO 是 integrated upper-bound benchmark (= Mstar, joint optimization)
-    %   Small: 3-4 terminals, 2-3 waypoints, 尽量 exact
-    %   Medium: 5-6 terminals, 3-4 waypoints, time-limited + gap
-    %
-    %   比较: B0 / B1 / M1(=O1) / M2(=O2) / PR / JO
-    %   核心输出:
-    %     - gap to JO per model
-    %     - PR gap closure vs B0/B1
-    %     - JO vs PR runtime ratio
+    % runEXP7  向上比 integrated upper bound (JO) (二轮修改)
+    %   修改:
+    %     - 去掉 PR (等 4D 修好)
+    %     - 用 M2N 代替 M2
+    %     - gap 指标改为: Delta_J / J_scale (J_scale = totalDemand * meanTC)
+    %     - JO quality gate: 只有 optimal 或 MIPGap<=1e-3 才当 upper bound
+    %     - 报告 median + IQR, 不用 mean
     arguments
         outDir (1,1) string = "results/exp7"
     end
@@ -21,18 +17,6 @@ function runEXP7(outDir)
 
     flog = fopen(logFile, 'a');
     logmsg = @(m) fprintf(flog, '[%s] %s\n', datestr(now,'HH:MM:SS'), m);
-
-    % 加载 calibrated rule
-    ruleFile = fullfile('results', 'exp4d', 'calibrated_rule.mat');
-    if exist(ruleFile, 'file')
-        rl = load(ruleFile);
-        rule = rl.calibratedRule;
-        logmsg(sprintf('加载 rule: E_A>=%.2f, E_S>=%.2f, E_F>=%.2f', ...
-            rule.eaThresh, rule.esThresh, rule.efThresh));
-    else
-        logmsg('未找到 calibrated_rule.mat, 使用默认规则');
-        rule = struct('eaThresh', 0.3, 'esThresh', 0.5, 'efThresh', 0.2);
-    end
 
     % Small + medium specs
     families = struct('name',{'JO_S','JO_M'}, ...
@@ -56,17 +40,31 @@ function runEXP7(outDir)
         end
     end
     total = numel(combos);
-    logmsg(sprintf('=== EXP-7 JO Upper Bound: %d 实例 ===', total));
+    logmsg(sprintf('=== EXP-7 JO Upper Bound (二轮): %d 实例 ===', total));
 
     if exist(cpFile, 'file')
         cp = load(cpFile);
-        results = cp.results;
-        completed = cp.completed;
-        logmsg(sprintf('加载 checkpoint: %d/%d', sum(completed), total));
+        % 版本检查: v2 = tdBB 相对 JO 设计 + 新 gap 指标
+        cpVersionOK = isfield(cp, 'cpVersion') && cp.cpVersion >= 2;
+        if cpVersionOK && numel(cp.completed) == total
+            results = cp.results;
+            completed = cp.completed;
+            logmsg(sprintf('加载 checkpoint v2: %d/%d', sum(completed), total));
+        else
+            if ~cpVersionOK
+                logmsg('旧 checkpoint (v1) 不兼容新 tdBB 基线, 重新开始');
+            else
+                logmsg(sprintf('checkpoint 大小(%d)与网格(%d)不兼容, 重新开始', ...
+                    numel(cp.completed), total));
+            end
+            results = cell(total, 1);
+            completed = false(total, 1);
+        end
     else
         results = cell(total, 1);
         completed = false(total, 1);
     end
+    cpVersion = 2;  %#ok<NASGU> saved with checkpoint
 
     opts = struct('nPwl', 15, 'verbose', false);
 
@@ -85,32 +83,39 @@ function runEXP7(outDir)
             params = struct('alphaA', aA, 'kappaS', 2, 'phiF', pF, 'rho', rho);
             inst = asf.graphgen.buildSynthetic(spec, sd, params);
 
-            % 提取所有接口
+            % 计算 J_scale (二轮修改: 尺度化分母)
+            totalDemand = 0;
+            dkeys = inst.odDemand.keys;
+            for di = 1:numel(dkeys)
+                totalDemand = totalDemand + inst.odDemand(dkeys{di});
+            end
+            ekeys = inst.edges.keys;
+            meanTC = mean(arrayfun(@(k) inst.edges(char(k)).travelCost, string(ekeys)));
+            J_scale = totalDemand * meanTC;
+
+            % 提取接口 (M2N 代替 M2)
             b0i = containers.Map(); b1i = containers.Map();
-            m1i = containers.Map(); m2i = containers.Map();
-            m0i = containers.Map();
+            m1i = containers.Map(); m2ni = containers.Map();
             tkeys = inst.terminals.keys;
             for ti = 1:numel(tkeys)
                 t = inst.terminals(tkeys{ti});
                 b0i(tkeys{ti}) = asf.interface.extractB0(t);
                 b1i(tkeys{ti}) = asf.interface.extractB1(t, inst);
-                m0i(tkeys{ti}) = asf.interface.extractM0(t);
                 m1i(tkeys{ti}) = asf.interface.extractM1(t, inst);
-                m2i(tkeys{ti}) = asf.interface.extractM2(t, inst);
+                m2ni(tkeys{ti}) = asf.interface.extractM2N(t, inst);
             end
             ifaces = containers.Map();
             ifaces('B0') = b0i; ifaces('B1') = b1i;
-            ifaces('M0') = m0i; ifaces('M1') = m1i; ifaces('M2') = m2i;
+            ifaces('M1') = m1i; ifaces('M2') = m2ni;
 
             allLevels = ["B0";"B1";"M1";"M2"];
             res = asf.solver.computeRegret(inst, allLevels, ifaces, opts);
 
-            % === 独立求解 JO 并 truth evaluate, 确保 jJO 是真正的 JO 值 ===
+            % === JO 求解 + quality gate ===
             tJO0 = tic;
             joDesign = asf.solver.solveMILP(inst, "JO", containers.Map(), opts);
             joTime = toc(tJO0);
 
-            % JO 求解失败时跳过该实例
             if joDesign.objective == Inf
                 elapsed = toc(t0);
                 r = struct(); r.family = fname; r.seed = sd; r.rho = rho;
@@ -118,12 +123,17 @@ function runEXP7(outDir)
                 r.error = "JO_solve_failed"; r.time = elapsed;
                 r.joSolveTime = joTime;
                 results{idx} = r;
-                logmsg(sprintf('  JO 求解失败, 跳过 (%.1fs)', elapsed));
+                logmsg(sprintf('  JO 求解失败 (%.1fs)', elapsed));
                 completed(idx) = true;
-                save(cpFile, 'results', 'completed', 'combos');
+                save(cpFile, 'results', 'completed', 'combos', 'cpVersion');
                 continue;
             end
             [jJO, ~] = asf.solver.truthEvaluate(joDesign, inst);
+
+            % JO quality gate (二轮修改)
+            joOptimal = (joDesign.solveStatus == 1);
+            joGapOK = (~isnan(joDesign.mipGap) && joDesign.mipGap <= 1e-3);
+            joQualified = joOptimal || joGapOK;
 
             elapsed = toc(t0);
 
@@ -132,63 +142,29 @@ function runEXP7(outDir)
             r.alphaA = aA; r.phiF = pF;
             r.jJO = jJO;
             r.joSolveTime = joTime;
+            r.joStatus = joDesign.solveStatus;
+            r.joMipGap = joDesign.mipGap;
+            r.joQualified = joQualified;
+            r.J_scale = J_scale;
             r.time = elapsed; r.error = "";
+            r.E_A = inst.excitation.E_A; r.E_S = inst.excitation.E_S; r.E_F = inst.excitation.E_F;
 
             for lv = allLevels'
                 tag = char(lv);
                 lr = res.(tag);
                 r.(tag).jTruth = lr.jTruth;
-                r.(tag).gapToJO = lr.jTruth - jJO;
-                r.(tag).gapToJOPct = (lr.jTruth - jJO) / max(abs(jJO), 1e-10);
-                r.(tag).tdBB = lr.design.topologyDistBB(joDesign);  % 相对 JO 设计
+                % 新 gap 指标 (二轮修改)
+                r.(tag).deltaJ = lr.jTruth - jJO;  % 绝对 excess cost
+                r.(tag).deltaJ_scaled = (lr.jTruth - jJO) / max(J_scale, 1e-10);  % 尺度化 excess
+                % topology distance 相对 JO 设计 (不是 res.star.design)
+                r.(tag).tdBB = lr.design.topologyDistBB(joDesign);
                 r.(tag).solveTime = lr.solveTime;
             end
 
-            % PR
-            E_A = inst.excitation.E_A;
-            E_S = inst.excitation.E_S;
-            E_F = inst.excitation.E_F;
-            r.E_A = E_A; r.E_S = E_S; r.E_F = E_F;
-            prRec = applyRule(E_A, E_S, E_F, rule.eaThresh, rule.esThresh, rule.efThresh);
-            r.prRecommendation = char(prRec);
-            % PR 模型从已求解的 levels 中取（M1 或 M2, M0 不在 allLevels）
-            if prRec == "M0"
-                % M0 未求解，用 B0 近似（B0 = M0 的 incumbent 版本）
-                prData = res.B0;
-            else
-                prData = res.(char(prRec));
-            end
-            r.PR.jTruth = prData.jTruth;
-            r.PR.gapToJO = prData.jTruth - jJO;
-            r.PR.gapToJOPct = (prData.jTruth - jJO) / max(abs(jJO), 1e-10);
-            r.PR.solveTime = prData.solveTime;
-
-            % Gap closure
-            b0Gap = r.B0.gapToJO;
-            b1Gap = r.B1.gapToJO;
-            prGap = r.PR.gapToJO;
-            if b0Gap > 1e-10
-                r.prGapClosureVsB0 = 1 - prGap / b0Gap;
-            else
-                r.prGapClosureVsB0 = 0;
-            end
-            if b1Gap > 1e-10
-                r.prGapClosureVsB1 = 1 - prGap / b1Gap;
-            else
-                r.prGapClosureVsB1 = 0;
-            end
-
-            % Runtime ratio
-            if r.PR.solveTime > 1e-6
-                r.joVsPrRuntimeRatio = joTime / r.PR.solveTime;
-            else
-                r.joVsPrRuntimeRatio = Inf;
-            end
-
             results{idx} = r;
-            logmsg(sprintf('  JO=%.1f B0gap=%.1f%% M2gap=%.1f%% PRgap=%.1f%% closure=%.1f%% (%.1fs)', ...
-                jJO, r.B0.gapToJOPct*100, r.M2.gapToJOPct*100, r.PR.gapToJOPct*100, ...
-                r.prGapClosureVsB0*100, elapsed));
+            logmsg(sprintf('  JO=%.1f(gap=%.1e,qual=%d) B0Δ=%.2f%% M2NΔ=%.2f%% (%.1fs)', ...
+                jJO, joDesign.mipGap, joQualified, ...
+                r.B0.deltaJ_scaled*100, r.M2.deltaJ_scaled*100, elapsed));
         catch ME
             elapsed = toc(t0);
             r = struct(); r.family = fname; r.seed = sd; r.rho = rho;
@@ -198,42 +174,45 @@ function runEXP7(outDir)
             logmsg(sprintf('  ERROR: %s', ME.message));
         end
         completed(idx) = true;
-        save(cpFile, 'results', 'completed', 'combos');
+        save(cpFile, 'results', 'completed', 'combos', 'cpVersion');
     end
 
     save(resultFile, 'results', 'combos');
     logmsg('=== EXP-7 完成 ===');
     fclose(flog);
 
-    % 控制台汇总
-    fprintf('\n=== EXP-7 JO Upper Bound 汇总 ===\n');
-    nValid = 0; sumGap = struct('B0',0,'B1',0,'M1',0,'M2',0,'PR',0);
-    sumClosure = 0;
+    % 控制台汇总: median + IQR
+    fprintf('\n=== EXP-7 JO Upper Bound (二轮) ===\n');
+    modelTags = ["B0","B1","M1","M2"];
+    modelLabels = ["B0","B1","M1","M2N"];
+
+    % 只用 qualified JO 实例
+    qualResults = {};
+    unqualCount = 0;
     for idx = 1:total
         r = results{idx};
         if isempty(r) || (~isempty(r.error) && r.error ~= ""), continue; end
-        nValid = nValid + 1;
-        for lv = ["B0","B1","M1","M2","PR"]
-            sumGap.(char(lv)) = sumGap.(char(lv)) + r.(char(lv)).gapToJOPct;
+        if r.joQualified
+            qualResults{end+1} = r; %#ok<AGROW>
+        else
+            unqualCount = unqualCount + 1;
         end
-        sumClosure = sumClosure + r.prGapClosureVsB0;
     end
-    if nValid > 0
-        fprintf('平均 gap to JO (%d 实例):\n', nValid);
-        for lv = ["B0","B1","M1","M2","PR"]
-            fprintf('  %s: %.2f%%\n', lv, sumGap.(char(lv))/nValid*100);
+    nQual = numel(qualResults);
+    fprintf('Qualified JO instances: %d (uncertain: %d)\n\n', nQual, unqualCount);
+
+    fprintf('%-5s  %10s  %10s  %10s\n', 'Model', 'med Δ/Js%', 'P25', 'P75');
+    for mi = 1:numel(modelTags)
+        tag = char(modelTags(mi));
+        vals = [];
+        for qi = 1:nQual
+            if isfield(qualResults{qi}, tag) && isfield(qualResults{qi}.(tag), 'deltaJ_scaled')
+                vals(end+1) = qualResults{qi}.(tag).deltaJ_scaled; %#ok<AGROW>
+            end
         end
-        fprintf('PR gap closure vs B0: %.1f%%\n', sumClosure/nValid*100);
-    end
-end
-
-
-function rec = applyRule(E_A, E_S, E_F, eaThresh, esThresh, efThresh)
-    if E_F >= efThresh
-        rec = "M2";
-    elseif E_A >= eaThresh || E_S >= esThresh
-        rec = "M1";
-    else
-        rec = "M0";
+        if ~isempty(vals)
+            fprintf('%-5s  %9.2f%%  %9.2f%%  %9.2f%%\n', ...
+                modelLabels(mi), median(vals)*100, quantile(vals,0.25)*100, quantile(vals,0.75)*100);
+        end
     end
 end

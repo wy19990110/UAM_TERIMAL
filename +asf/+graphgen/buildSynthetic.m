@@ -11,6 +11,8 @@ function inst = buildSynthetic(spec, seed, params)
     %           .psiSat   (固定饱和惩罚系数, NaN=随机)
     %           .concentration (OD 集中度, 0=均匀, 1=全部集中到单个 terminal)
     %           .portMisalignDeg (port 方向额外偏移角度, 0=不偏移)
+    %           .r_shared (共享资源占比, 0~1, 控制有耦合的端口对比例)
+    %           .eta (饱和激活强度, q_total/mu_bar, 覆盖 rho 的需求缩放)
     arguments
         spec struct
         seed (1,1) double = 42
@@ -152,9 +154,40 @@ function inst = buildSynthetic(spec, seed, params)
             b = (0.2 + rand*0.2) * ratio;
             ports(pi2) = asf.core.PortConfig(sprintf("h%d",pi2), portDirs(pi2), sectorHW, a, b);
         end
+        % 跨端口耦合 (支持 r_shared: 仅部分端口对有耦合)
+        allPairs = {};
         for pi2 = 1:nPorts
             for pj = pi2+1:nPorts
-                fn = sprintf('h%d_h%d', pi2, pj);
+                allPairs{end+1} = [pi2, pj]; %#ok<AGROW>
+            end
+        end
+        nPairs = numel(allPairs);
+        if isfield(params, 'r_shared') && ~isnan(params.r_shared)
+            % r_shared 控制有耦合的端口对比例
+            nShared = max(0, round(nPairs * params.r_shared));
+            if nShared > 0 && nPairs > 0
+                sharedIdx = randperm(nPairs, min(nShared, nPairs));
+            else
+                sharedIdx = [];
+            end
+            for ki2 = 1:nPairs
+                pair = allPairs{ki2};
+                fn = sprintf('h%d_h%d', pair(1), pair(2));
+                if any(sharedIdx == ki2)
+                    if isfield(params, 'couplingM') && ~isnan(params.couplingM)
+                        coupling.(fn) = params.couplingM;
+                    else
+                        coupling.(fn) = 0.1 + rand*0.3;
+                    end
+                else
+                    coupling.(fn) = 0;
+                end
+            end
+        else
+            % 原有逻辑: 全部端口对都有耦合
+            for ki2 = 1:nPairs
+                pair = allPairs{ki2};
+                fn = sprintf('h%d_h%d', pair(1), pair(2));
                 if isfield(params, 'couplingM') && ~isnan(params.couplingM)
                     coupling.(fn) = params.couplingM;
                 else
@@ -341,7 +374,7 @@ function inst = buildSynthetic(spec, seed, params)
             end
         end
     end
-    % 归一化: 保持 Σ(demand) 不变
+    % 归一化: concentration 只改分布, 保 Σ(demand) 不变, 使 concentration 与 rho/eta 正交
     if ~isempty(odBase)
         rawTotal = sum(odBase);
         weighted = odBase .* odWeights;
@@ -353,6 +386,36 @@ function inst = buildSynthetic(spec, seed, params)
         end
         for k = 1:numel(odKeys)
             inst.odDemand(odKeys{k}) = weighted(k) * scale;
+        end
+        % 验证: 总需求保持不变
+        finalTotal = 0;
+        dkeys = inst.odDemand.keys;
+        for k = 1:numel(dkeys)
+            finalTotal = finalTotal + inst.odDemand(dkeys{k});
+        end
+        assert(abs(finalTotal - rawTotal) < 1e-6 * max(rawTotal, 1), ...
+            'buildSynthetic: concentration 重加权后总需求偏移 (%.4f vs %.4f)', finalTotal, rawTotal);
+    end
+
+    % === eta 重缩放: q_total / mu_bar_total = eta ===
+    % 如果指定 eta, 则调整总需求使饱和比 = eta
+    if isfield(params, 'eta') && ~isnan(params.eta)
+        totalMuBar = 0;
+        for ti = 1:numel(tkeys2)
+            terminal = inst.terminals(tkeys2{ti});
+            totalMuBar = totalMuBar + terminal.muBar;
+        end
+        currentTotal = 0;
+        dkeys = inst.odDemand.keys;
+        for k = 1:numel(dkeys)
+            currentTotal = currentTotal + inst.odDemand(dkeys{k});
+        end
+        if currentTotal > 1e-10
+            targetTotal = params.eta * totalMuBar;
+            etaScale = targetTotal / currentTotal;
+            for k = 1:numel(dkeys)
+                inst.odDemand(dkeys{k}) = inst.odDemand(dkeys{k}) * etaScale;
+            end
         end
     end
 end

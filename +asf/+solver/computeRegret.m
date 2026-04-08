@@ -123,17 +123,18 @@ function results = computeRegret(inst, levels, ifaces, opts)
     end
 
     % === Pairwise uplift 指标 ===
+    % Uplift 指标: 分母统一用 jStar (全局最优 truth cost), 避免异常大分母掩盖问题
     if isfield(results, 'M0') && isfield(results, 'M1')
         results.U01 = results.M0.jTruth - results.M1.jTruth;
-        results.relU01 = results.U01 / max(abs(results.M0.jTruth), 1e-10);
+        results.relU01 = results.U01 / max(abs(jStar), 1e-10);
     end
     if isfield(results, 'M1') && isfield(results, 'M2')
         results.U12 = results.M1.jTruth - results.M2.jTruth;
-        results.relU12 = results.U12 / max(abs(results.M1.jTruth), 1e-10);
+        results.relU12 = results.U12 / max(abs(jStar), 1e-10);
     end
     if isfield(results, 'M0') && isfield(results, 'M2')
         results.U02 = results.M0.jTruth - results.M2.jTruth;
-        results.relU02 = results.U02 / max(abs(results.M0.jTruth), 1e-10);
+        results.relU02 = results.U02 / max(abs(jStar), 1e-10);
     end
     % Model recommendation
     results.recommendation = "M0";
