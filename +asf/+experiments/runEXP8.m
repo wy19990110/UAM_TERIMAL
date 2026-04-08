@@ -149,6 +149,10 @@ function runEXP8(outDir)
                     catch ME2
                         r.(tag).error = ME2.message;
                         r.(tag).time = toc(tLv);
+                        r.(tag).truthObj = Inf;
+                        r.(tag).deltaJ = Inf;
+                        r.(tag).deltaJ_scaled = Inf;
+                        r.(tag).timedOut = true;
                     end
                 end
 

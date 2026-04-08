@@ -374,7 +374,7 @@ function inst = buildSynthetic(spec, seed, params)
             end
         end
     end
-    % 归一化: 保持 Σ(demand) 不变
+    % 归一化: concentration 只改分布, 保 Σ(demand) 不变, 使 concentration 与 rho/eta 正交
     if ~isempty(odBase)
         rawTotal = sum(odBase);
         weighted = odBase .* odWeights;
@@ -387,6 +387,14 @@ function inst = buildSynthetic(spec, seed, params)
         for k = 1:numel(odKeys)
             inst.odDemand(odKeys{k}) = weighted(k) * scale;
         end
+        % 验证: 总需求保持不变
+        finalTotal = 0;
+        dkeys = inst.odDemand.keys;
+        for k = 1:numel(dkeys)
+            finalTotal = finalTotal + inst.odDemand(dkeys{k});
+        end
+        assert(abs(finalTotal - rawTotal) < 1e-6 * max(rawTotal, 1), ...
+            'buildSynthetic: concentration 重加权后总需求偏移 (%.4f vs %.4f)', finalTotal, rawTotal);
     end
 
     % === eta 重缩放: q_total / mu_bar_total = eta ===

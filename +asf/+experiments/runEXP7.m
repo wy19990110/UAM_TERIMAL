@@ -44,11 +44,19 @@ function runEXP7(outDir)
 
     if exist(cpFile, 'file')
         cp = load(cpFile);
-        if numel(cp.completed) == total
+        % 版本检查: v2 = tdBB 相对 JO 设计 + 新 gap 指标
+        cpVersionOK = isfield(cp, 'cpVersion') && cp.cpVersion >= 2;
+        if cpVersionOK && numel(cp.completed) == total
             results = cp.results;
             completed = cp.completed;
-            logmsg(sprintf('加载 checkpoint: %d/%d', sum(completed), total));
+            logmsg(sprintf('加载 checkpoint v2: %d/%d', sum(completed), total));
         else
+            if ~cpVersionOK
+                logmsg('旧 checkpoint (v1) 不兼容新 tdBB 基线, 重新开始');
+            else
+                logmsg(sprintf('checkpoint 大小(%d)与网格(%d)不兼容, 重新开始', ...
+                    numel(cp.completed), total));
+            end
             results = cell(total, 1);
             completed = false(total, 1);
         end
@@ -56,6 +64,7 @@ function runEXP7(outDir)
         results = cell(total, 1);
         completed = false(total, 1);
     end
+    cpVersion = 2;  %#ok<NASGU> saved with checkpoint
 
     opts = struct('nPwl', 15, 'verbose', false);
 
@@ -116,7 +125,7 @@ function runEXP7(outDir)
                 results{idx} = r;
                 logmsg(sprintf('  JO 求解失败 (%.1fs)', elapsed));
                 completed(idx) = true;
-                save(cpFile, 'results', 'completed', 'combos');
+                save(cpFile, 'results', 'completed', 'combos', 'cpVersion');
                 continue;
             end
             [jJO, ~] = asf.solver.truthEvaluate(joDesign, inst);
@@ -142,12 +151,13 @@ function runEXP7(outDir)
 
             for lv = allLevels'
                 tag = char(lv);
-                if tag(1) == 'M' && tag(end) == '2', dispTag = "M2N"; else, dispTag = tag; end
                 lr = res.(tag);
                 r.(tag).jTruth = lr.jTruth;
                 % 新 gap 指标 (二轮修改)
                 r.(tag).deltaJ = lr.jTruth - jJO;  % 绝对 excess cost
                 r.(tag).deltaJ_scaled = (lr.jTruth - jJO) / max(J_scale, 1e-10);  % 尺度化 excess
+                % topology distance 相对 JO 设计 (不是 res.star.design)
+                r.(tag).tdBB = lr.design.topologyDistBB(joDesign);
                 r.(tag).solveTime = lr.solveTime;
             end
 
@@ -164,7 +174,7 @@ function runEXP7(outDir)
             logmsg(sprintf('  ERROR: %s', ME.message));
         end
         completed(idx) = true;
-        save(cpFile, 'results', 'completed', 'combos');
+        save(cpFile, 'results', 'completed', 'combos', 'cpVersion');
     end
 
     save(resultFile, 'results', 'combos');
